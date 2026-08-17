@@ -27,10 +27,25 @@ from .models import (COVER, MODES, SPLIT, Application, Assignment, Base, Batch,
                      BatchApplication, Job, Profile, Upload, User, utcnow)
 from .schema import bring_up_to_date
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dispatch.db")
+def _database_url() -> str:
+    """Hosted Postgres add-ons hand out `postgres://…`, which SQLAlchemy 2 no
+    longer recognises, and none of them say so. Normalise it here so pasting the
+    connection string straight from Render, Neon or Heroku just works."""
+    url = os.getenv("DATABASE_URL", "sqlite:///./dispatch.db").strip()
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg2://" + url[len(prefix):]
+    return url
+
+
+DATABASE_URL = _database_url()
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-before-you-deploy-this")
 JWT_HOURS = int(os.getenv("JWT_HOURS", "12"))
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+
+# Set when one process serves the built browser app as well as the API, which
+# is how this deploys: one container, one URL, no proxy to wire up.
+WEB_ROOT = os.getenv("WEB_ROOT", "")
 
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
 
@@ -810,3 +825,54 @@ def download_report(batch_id: int, db: Session = Depends(get_db), _: User = Depe
 @app.get("/api/health")
 def health():
     return {"ok": True, "time": utcnow().isoformat()}
+
+
+# --------------------------------------------------------------------------- #
+# First run, and serving the browser app
+# --------------------------------------------------------------------------- #
+
+def bootstrap_admin() -> None:
+    """Create the first manager from the environment, once, on an empty database.
+
+    A hosted deployment often has no shell to run seed.py in — on Render's free
+    tier there is none at all — so the account that lets you in has to be able
+    to create itself. Does nothing if any manager already exists, so it cannot
+    resurrect an account you deliberately removed.
+    """
+    email = os.getenv("ADMIN_EMAIL", "").strip().lower()
+    password = os.getenv("ADMIN_PASSWORD", "")
+    if not email or len(password) < 8:
+        return
+    db = SessionLocal()
+    try:
+        if db.scalar(select(User).where(User.role == "admin")):
+            return
+        db.add(User(email=email, name=os.getenv("ADMIN_NAME", "Manager").strip() or "Manager",
+                    password_hash=hash_password(password), role="admin"))
+        db.commit()
+        print(f"Created the first manager account: {email}")
+    finally:
+        db.close()
+
+
+bootstrap_admin()
+
+if WEB_ROOT and os.path.isdir(WEB_ROOT):
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    _INDEX = os.path.join(WEB_ROOT, "index.html")
+    app.mount("/assets", StaticFiles(directory=os.path.join(WEB_ROOT, "assets")),
+              name="assets")
+
+    # Registered last, so every /api route above already owns its path. React
+    # does its own routing, so anything else hands back index.html rather than
+    # a 404 — but a wrong /api path must still fail like an API, not like a page.
+    @app.get("/{path:path}", include_in_schema=False)
+    def browser_app(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(404, "No such endpoint.")
+        candidate = os.path.join(WEB_ROOT, path)
+        if path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(_INDEX)
