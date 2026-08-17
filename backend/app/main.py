@@ -1,0 +1,812 @@
+"""Dispatch API.
+
+Run locally:  uvicorn app.main:app --reload --port 8000
+Interactive docs: http://localhost:8000/docs
+
+The unit of work is a profile, not a person — see models.py.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import os
+from collections import defaultdict
+from typing import Iterable, Optional
+
+import bcrypt
+import jwt
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, EmailStr
+from sqlalchemy import create_engine, delete, func, insert, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from . import exports, ingest, matching
+from .models import (COVER, MODES, SPLIT, Application, Assignment, Base, Batch,
+                     BatchApplication, Job, Profile, Upload, User, utcnow)
+from .schema import bring_up_to_date
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dispatch.db")
+JWT_SECRET = os.getenv("JWT_SECRET", "change-me-before-you-deploy-this")
+JWT_HOURS = int(os.getenv("JWT_HOURS", "12"))
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+
+# SQLite caps the number of bound parameters in one statement, so every IN (…)
+# built from user data is fed through in slices.
+_PARAM_CHUNK = 500
+
+
+def _chunks(items: Iterable, size: int = _PARAM_CHUNK):
+    items = list(items)
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+Base.metadata.create_all(engine)
+bring_up_to_date(engine)
+
+app = FastAPI(title="Dispatch", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in CORS_ORIGINS if o.strip()],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+bearer = HTTPBearer(auto_error=False)
+
+
+# --------------------------------------------------------------------------- #
+# Auth
+# --------------------------------------------------------------------------- #
+
+def hash_password(raw: str) -> str:
+    return bcrypt.hashpw(raw.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(raw: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(raw.encode(), hashed.encode())
+    except ValueError:
+        return False
+
+
+def make_token(user: User) -> str:
+    payload = {
+        "sub": str(user.id),
+        "role": user.role,
+        "exp": dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=JWT_HOURS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def current_user(
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
+    db: Session = Depends(get_db),
+) -> User:
+    if creds is None:
+        raise HTTPException(401, "Sign in to continue.")
+    try:
+        payload = jwt.decode(creds.credentials, JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Your session expired. Sign in again.")
+    except jwt.PyJWTError:
+        raise HTTPException(401, "That session is not valid.")
+    user = db.get(User, int(payload["sub"]))
+    if user is None or not user.is_active:
+        raise HTTPException(401, "This account is no longer active.")
+    return user
+
+
+def admin_only(user: User = Depends(current_user)) -> User:
+    if user.role != "admin":
+        raise HTTPException(403, "Only a manager can do that.")
+    return user
+
+
+def owned_profile(profile_id: int, db: Session, user: User) -> Profile:
+    """The profile, if this person is allowed to act as it."""
+    profile = db.get(Profile, profile_id)
+    if profile is None or not profile.is_active:
+        raise HTTPException(404, "No such profile.")
+    if user.role != "admin" and profile.user_id != user.id:
+        raise HTTPException(403, "That profile belongs to someone else.")
+    return profile
+
+
+# --------------------------------------------------------------------------- #
+# Request and response shapes
+# --------------------------------------------------------------------------- #
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserIn(BaseModel):
+    email: EmailStr
+    name: str
+    password: str
+    role: str = "bd"
+
+
+class ProfileIn(BaseModel):
+    name: str
+    headline: str = ""
+    platform: str = ""
+    user_id: Optional[int] = None
+
+
+class ProfilePatch(BaseModel):
+    name: Optional[str] = None
+    headline: Optional[str] = None
+    platform: Optional[str] = None
+    user_id: Optional[int] = None
+
+
+class BatchIn(BaseModel):
+    name: str
+    quota: int = 40
+    mode: str = COVER
+    one_per_client: bool = False
+
+
+class MappingIn(BaseModel):
+    mapping: dict
+
+
+class StatusIn(BaseModel):
+    status: str
+
+
+def user_json(u: User) -> dict:
+    return {"id": u.id, "email": u.email, "name": u.name, "role": u.role,
+            "is_active": u.is_active}
+
+
+def profile_json(p: Profile, owner: Optional[User] = None) -> dict:
+    return {"id": p.id, "name": p.name, "headline": p.headline,
+            "platform": p.platform, "user_id": p.user_id,
+            "owner": owner.name if owner else None, "is_active": p.is_active,
+            "label": p.name if not p.headline else f"{p.name} · {p.headline}"}
+
+
+def batch_json(b: Batch) -> dict:
+    return {"id": b.id, "name": b.name, "status": b.status, "quota": b.quota,
+            "mode": b.mode, "one_per_client": b.one_per_client,
+            "created_at": b.created_at.isoformat() if b.created_at else None,
+            "computed_at": b.computed_at.isoformat() if b.computed_at else None,
+            "report": b.report or {}}
+
+
+# --------------------------------------------------------------------------- #
+# Auth routes
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/auth/login")
+def login(body: LoginIn, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == body.email.lower()))
+    if not user or not verify_password(body.password, user.password_hash):
+        raise HTTPException(401, "That email and password do not match.")
+    if not user.is_active:
+        raise HTTPException(403, "This account has been switched off.")
+    return {"token": make_token(user), "user": user_json(user)}
+
+
+@app.get("/api/auth/me")
+def me(user: User = Depends(current_user)):
+    return user_json(user)
+
+
+# --------------------------------------------------------------------------- #
+# People (manager)
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/users")
+def list_users(db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    return [user_json(u) for u in db.scalars(select(User).order_by(User.name)).all()]
+
+
+@app.post("/api/users", status_code=201)
+def create_user(body: UserIn, db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    if db.scalar(select(User).where(User.email == body.email.lower())):
+        raise HTTPException(409, "Someone already uses that email.")
+    if body.role not in ("admin", "bd"):
+        raise HTTPException(400, "Role must be admin or bd.")
+    if len(body.password) < 8:
+        raise HTTPException(400, "Use a password of at least 8 characters.")
+    user = User(email=body.email.lower(), name=body.name.strip(),
+                password_hash=hash_password(body.password), role=body.role)
+    db.add(user)
+    db.commit()
+    return user_json(user)
+
+
+@app.delete("/api/users/{user_id}")
+def deactivate_user(user_id: int, db: Session = Depends(get_db), admin: User = Depends(admin_only)):
+    if user_id == admin.id:
+        raise HTTPException(400, "You cannot switch off your own account.")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "No such person.")
+    user.is_active = False
+    db.commit()
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Profiles — the identities jobs are applied under
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/profiles")
+def list_profiles(mine: bool = False, db: Session = Depends(get_db),
+                  user: User = Depends(current_user)):
+    """Managers see every profile. A BD sees the ones they run."""
+    query = select(Profile).where(Profile.is_active == True)  # noqa: E712
+    if mine or user.role != "admin":
+        query = query.where(Profile.user_id == user.id)
+    owners = {u.id: u for u in db.scalars(select(User)).all()}
+    return [profile_json(p, owners.get(p.user_id))
+            for p in db.scalars(query.order_by(Profile.name)).all()]
+
+
+@app.post("/api/profiles", status_code=201)
+def create_profile(body: ProfileIn, db: Session = Depends(get_db),
+                   _: User = Depends(admin_only)):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Give the profile a name — whatever the client sees.")
+    clash = db.scalar(select(Profile).where(func.lower(Profile.name) == name.lower()))
+    if clash:
+        raise HTTPException(409, f"There is already a profile called {clash.name}. "
+                                 "Two profiles with one name would split its history in half.")
+    if body.user_id is not None and not db.get(User, body.user_id):
+        raise HTTPException(400, "No such person to run it.")
+    profile = Profile(name=name, headline=body.headline.strip(),
+                      platform=body.platform.strip(), user_id=body.user_id)
+    db.add(profile)
+    db.commit()
+    return profile_json(profile, db.get(User, profile.user_id) if profile.user_id else None)
+
+
+@app.patch("/api/profiles/{profile_id}")
+def update_profile(profile_id: int, body: ProfilePatch, db: Session = Depends(get_db),
+                   _: User = Depends(admin_only)):
+    profile = db.get(Profile, profile_id)
+    if not profile:
+        raise HTTPException(404, "No such profile.")
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "A profile needs a name.")
+        clash = db.scalar(select(Profile).where(func.lower(Profile.name) == name.lower(),
+                                                Profile.id != profile_id))
+        if clash:
+            raise HTTPException(409, f"There is already a profile called {clash.name}.")
+        profile.name = name
+    if body.headline is not None:
+        profile.headline = body.headline.strip()
+    if body.platform is not None:
+        profile.platform = body.platform.strip()
+    if body.user_id is not None:
+        if not db.get(User, body.user_id):
+            raise HTTPException(400, "No such person to run it.")
+        profile.user_id = body.user_id
+    db.commit()
+    return profile_json(profile, db.get(User, profile.user_id) if profile.user_id else None)
+
+
+@app.delete("/api/profiles/{profile_id}")
+def retire_profile(profile_id: int, db: Session = Depends(get_db),
+                   _: User = Depends(admin_only)):
+    profile = db.get(Profile, profile_id)
+    if not profile:
+        raise HTTPException(404, "No such profile.")
+    profile.is_active = False
+    db.commit()
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Batches
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/batches")
+def list_batches(db: Session = Depends(get_db), _: User = Depends(current_user)):
+    return [batch_json(b) for b in db.scalars(select(Batch).order_by(Batch.id.desc())).all()]
+
+
+@app.post("/api/batches", status_code=201)
+def create_batch(body: BatchIn, db: Session = Depends(get_db), admin: User = Depends(admin_only)):
+    if body.mode not in MODES:
+        raise HTTPException(400, f"Mode must be one of {', '.join(MODES)}.")
+    batch = Batch(name=body.name.strip() or f"Batch {utcnow():%d %b}",
+                  quota=max(1, body.quota), mode=body.mode,
+                  one_per_client=body.one_per_client, created_by=admin.id)
+    db.add(batch)
+    db.commit()
+    return batch_json(batch)
+
+
+@app.get("/api/batches/{batch_id}")
+def get_batch(batch_id: int, db: Session = Depends(get_db), _: User = Depends(current_user)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "No such batch.")
+    uploads = db.scalars(select(Upload).where(Upload.batch_id == batch_id)).all()
+    profiles = {p.id: p for p in db.scalars(select(Profile)).all()}
+    owners = {u.id: u.name for u in db.scalars(select(User)).all()}
+    return {
+        **batch_json(batch),
+        "uploads": [
+            {"id": u.id, "profile_id": u.profile_id,
+             "profile": profiles[u.profile_id].name if u.profile_id in profiles else "?",
+             "headline": profiles[u.profile_id].headline if u.profile_id in profiles else "",
+             "person": owners.get(u.user_id, "?"),
+             "filename": u.filename, "row_count": u.row_count,
+             "headers": u.headers, "mapping": u.mapping}
+            for u in uploads
+        ],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Uploads — one sheet per profile, per cycle
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/batches/{batch_id}/uploads", status_code=201)
+def upload_sheet(batch_id: int, profile_id: int = Form(...), file: UploadFile = File(...),
+                 db: Session = Depends(get_db), user: User = Depends(current_user)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "No such batch.")
+    if batch.status != "open":
+        raise HTTPException(400, "This batch is already computed. Ask your manager to open a new one.")
+    profile = owned_profile(profile_id, db, user)
+
+    too_big = "That file is over 15 MB. Split it or remove extra columns."
+    if (file.size or 0) > MAX_UPLOAD_BYTES:      # rejected before it is read
+        raise HTTPException(413, too_big)
+    raw = file.file.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, too_big)
+    try:
+        frame = ingest.read_table(raw, file.filename or "sheet.csv")
+    except Exception as exc:
+        raise HTTPException(400, f"Could not read that file: {exc}")
+
+    headers = list(frame.columns)
+    rows = frame.to_dict(orient="records")
+    mapping = ingest.auto_map(headers)
+
+    # One sheet per profile per batch — a re-upload replaces the old one.
+    existing = db.scalar(select(Upload).where(Upload.batch_id == batch_id,
+                                              Upload.profile_id == profile.id))
+    if existing:
+        db.delete(existing)
+        db.flush()
+
+    upload = Upload(batch_id=batch_id, profile_id=profile.id, user_id=user.id,
+                    filename=file.filename, row_count=len(rows), headers=headers,
+                    mapping=mapping, rows=rows)
+    db.add(upload)
+    db.commit()
+
+    return {"id": upload.id, "profile_id": profile.id, "profile": profile.name,
+            "filename": upload.filename, "row_count": upload.row_count,
+            "headers": headers, "mapping": mapping,
+            "preview": rows[:5], "fields": ingest.FIELDS}
+
+
+@app.patch("/api/uploads/{upload_id}/mapping")
+def set_mapping(upload_id: int, body: MappingIn, db: Session = Depends(get_db),
+                user: User = Depends(current_user)):
+    upload = db.get(Upload, upload_id)
+    if not upload:
+        raise HTTPException(404, "No such upload.")
+    owned_profile(upload.profile_id, db, user)
+    upload.mapping = {k: v for k, v in body.mapping.items()
+                      if k in {f["key"] for f in ingest.FIELDS}}
+    db.commit()
+    return {"ok": True, "mapping": upload.mapping}
+
+
+@app.delete("/api/uploads/{upload_id}")
+def delete_upload(upload_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    upload = db.get(Upload, upload_id)
+    if not upload:
+        raise HTTPException(404, "No such upload.")
+    owned_profile(upload.profile_id, db, user)
+    db.delete(upload)
+    db.commit()
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Compute — the heart of it
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/batches/{batch_id}/compute")
+def compute(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "No such batch.")
+
+    uploads = db.scalars(select(Upload).where(Upload.batch_id == batch_id)).all()
+    if len(uploads) < 2:
+        raise HTTPException(400, "At least two sheets are needed before anything can be compared.")
+
+    # 1. Flatten every sheet into canonical records tagged with the profile it
+    #    was handed in for.
+    records = []
+    for upload in uploads:
+        for row in ingest.apply_mapping(upload.rows or [], upload.mapping or {}):
+            fp, tier = matching.fingerprint(row["url"], row["title"], row["company"])
+            if not fp:
+                continue
+            records.append({**row, "fp": fp, "tier": tier, "profile_id": upload.profile_id})
+
+    if not records:
+        raise HTTPException(400, "No usable rows. Check that a job link, or a title and client, is mapped.")
+
+    # 2. Collapse near-duplicate L3 fingerprints.
+    remap = matching.fuzzy_merge(records)
+    for record in records:
+        if record["fp"] in remap:
+            record["fp"] = remap[record["fp"]]
+            record["tier"] = "L3f"
+
+    # 3. Upsert jobs, then record applications. Every lookup here is done in
+    #    bulk: one query per few hundred fingerprints rather than one query per
+    #    row, which is the difference between a snappy Compute and a minute of
+    #    staring at a spinner on a real team's sheets.
+    known: dict[str, Job] = {}
+    for chunk in _chunks({record["fp"] for record in records}):
+        for job in db.scalars(select(Job).where(Job.fingerprint.in_(chunk))):
+            known[job.fingerprint] = job
+
+    seen: dict[str, Job] = {}
+    fresh: list[Job] = []
+    for record in records:
+        fp = record["fp"]
+        if fp in seen:
+            continue
+        job = known.get(fp)
+        if job is None:
+            job = Job(fingerprint=fp, tier=record["tier"], title=record["title"][:500],
+                      company=record["company"][:300],
+                      company_key=matching.normalize_text(record["company"])[:300],
+                      platform=record["platform"][:120], url=record["url"])
+            fresh.append(job)
+        else:
+            job.title = job.title or record["title"][:500]
+            job.company = job.company or record["company"][:300]
+            job.url = job.url or record["url"]
+        seen[fp] = job
+    if fresh:
+        db.add_all(fresh)
+        db.flush()
+
+    applied_by: dict[int, set[int]] = {}
+    for record in records:
+        job = seen[record["fp"]]
+        applied_by.setdefault(job.id, set()).add(record["profile_id"])
+
+    owner_of = {p.id: p.user_id for p in db.scalars(select(Profile)).all()}
+
+    have: set[tuple[int, int]] = set()
+    for chunk in _chunks(applied_by):
+        have.update(map(tuple, db.execute(
+            select(Application.job_id, Application.profile_id)
+            .where(Application.job_id.in_(chunk))).all()))
+    new_applications = [
+        {"job_id": job_id, "profile_id": pid, "user_id": owner_of.get(pid),
+         "batch_id": batch_id}
+        for job_id, pids in applied_by.items() for pid in pids
+        if (job_id, pid) not in have
+    ]
+    if new_applications:
+        db.execute(insert(Application), new_applications)
+
+    # The per-cycle record. `applications` is all-time and unique per
+    # (job, profile), so it cannot say who collided *in this cycle* once a later
+    # cycle exists — that is what the manager's report needs.
+    db.execute(delete(BatchApplication).where(BatchApplication.batch_id == batch_id))
+    this_cycle = [{"batch_id": batch_id, "job_id": job_id, "profile_id": pid}
+                  for job_id, pids in applied_by.items() for pid in pids]
+    if this_cycle:
+        db.execute(insert(BatchApplication), this_cycle)
+    db.flush()
+
+    participants = sorted({u.profile_id for u in uploads if u.profile_id})
+
+    # 4. Anything still sitting unworked on a participant's list from an earlier
+    #    cycle comes back into the pool. A job someone simply ran out of time
+    #    for should not fall through the cracks because a new cycle opened.
+    carried = db.execute(
+        select(Assignment.job_id, Assignment.profile_id)
+        .where(Assignment.batch_id != batch_id,
+               Assignment.status == "pending",
+               Assignment.profile_id.in_(participants))
+    ).all() if participants else []
+
+    pool_ids = {job.id for job in seen.values()} | {job_id for job_id, _ in carried}
+
+    # 5. What each profile may NOT be given: anything it has already applied to
+    #    (all-time), and anything it looked at and skipped. Note this is per
+    #    profile, not per person — Khuram having applied says nothing about
+    #    whether Zahid should.
+    blocked: dict[int, set[int]] = defaultdict(set)
+    for chunk in _chunks(pool_ids):
+        for job_id, pid in db.execute(
+            select(Application.job_id, Application.profile_id)
+            .where(Application.job_id.in_(chunk))
+        ).all():
+            blocked[job_id].add(pid)
+        for job_id, pid in db.execute(
+            select(Assignment.job_id, Assignment.profile_id)
+            .where(Assignment.job_id.in_(chunk), Assignment.status == "skipped")
+        ).all():
+            blocked[job_id].add(pid)
+
+    job_rows: dict[int, Job] = {job.id: job for job in seen.values()}
+    missing = pool_ids - set(job_rows)
+    for chunk in _chunks(missing):
+        for job in db.scalars(select(Job).where(Job.id.in_(chunk))):
+            job_rows[job.id] = job
+
+    pool = [
+        {"job_id": job_id, "company_key": job_rows[job_id].company_key or "",
+         "blocked_for": blocked.get(job_id, set())}
+        for job_id in sorted(pool_ids) if job_id in job_rows
+    ]
+
+    place = matching.cover if batch.mode == COVER else matching.partition
+    assigned, stats = place(pool, participants, batch.quota, batch.one_per_client)
+
+    db.execute(delete(Assignment).where(Assignment.batch_id == batch_id))
+    db.flush()
+    dispatch = [{"batch_id": batch_id, "job_id": job_id, "profile_id": pid,
+                 "user_id": owner_of.get(pid), "status": "pending",
+                 "exclusive": batch.mode == SPLIT}
+                for pid, job_ids in assigned.items() for job_id in job_ids]
+    if dispatch:
+        db.execute(insert(Assignment), dispatch)
+
+    # A job that has moved onto this cycle's list should not still be sitting
+    # open on an earlier one, or the same work shows up once per cycle forever.
+    # Anything NOT re-dispatched keeps its old row, so it stays in the running.
+    placed = {(profile_id, job_id)
+              for profile_id, job_ids in assigned.items() for job_id in job_ids}
+    if placed:
+        stale = [row_id for row_id, profile_id, job_id in db.execute(
+            select(Assignment.id, Assignment.profile_id, Assignment.job_id)
+            .where(Assignment.batch_id != batch_id,
+                   Assignment.status == "pending",
+                   Assignment.profile_id.in_(participants))).all()
+            if (profile_id, job_id) in placed]
+        for chunk in _chunks(stale):
+            db.execute(delete(Assignment).where(Assignment.id.in_(chunk)))
+
+    # 6. Report for the manager.
+    profiles = {p.id: p for p in db.scalars(select(Profile)).all()}
+    owners = {u.id: u.name for u in db.scalars(select(User)).all()}
+    matrix = matching.overlap_matrix(
+        [{"applied_by": v} for v in applied_by.values()], participants)
+    collisions = sum(1 for v in applied_by.values() if len(v) > 1)
+    wasted = sum(len(v) - 1 for v in applied_by.values() if len(v) > 1)
+    reached = len({job_id for job_ids in assigned.values() for job_id in job_ids})
+
+    batch.report = {
+        "Rows read": len(records),
+        "Unique jobs": len(seen),
+        "Jobs carried over unworked": len(pool_ids) - len(seen),
+        "Jobs two profiles both applied to": collisions,
+        "Duplicate applications": wasted,
+        "Jobs nobody could take": stats["saturated"],
+        "Jobs held back by the client rule": stats["held_back_client"],
+        "Jobs held back by the quota": stats["held_back_quota"],
+        "Jobs put on a list": reached,
+        "Places on lists": stats["placements"],
+    }
+    batch.status = "computed"
+    batch.computed_at = utcnow()
+    db.commit()
+
+    return {
+        **batch_json(batch),
+        "participants": _participant_json(participants, profiles, owners, assigned),
+        "matrix": {"names": [profiles[p].name if p in profiles else "?" for p in participants],
+                   "rows": [[matrix[a][b] for b in participants] for a in participants]},
+    }
+
+
+def _participant_json(participants, profiles, owners, assigned=None, counts=None) -> list[dict]:
+    out = []
+    for pid in participants:
+        profile = profiles.get(pid)
+        out.append({
+            "id": pid,
+            "name": profile.name if profile else "?",
+            "headline": profile.headline if profile else "",
+            "person": owners.get(profile.user_id) if profile else None,
+            "assigned": len(assigned[pid]) if assigned is not None else counts.get(pid, 0),
+        })
+    return out
+
+
+@app.get("/api/batches/{batch_id}/report")
+def report(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    batch = db.get(Batch, batch_id)
+    if not batch or batch.status != "computed":
+        raise HTTPException(404, "That batch has not been computed yet.")
+
+    profiles = {p.id: p for p in db.scalars(select(Profile)).all()}
+    owners = {u.id: u.name for u in db.scalars(select(User)).all()}
+    participants = sorted({u.profile_id for u in
+                           db.scalars(select(Upload).where(Upload.batch_id == batch_id)).all()
+                           if u.profile_id})
+
+    # Only what was handed in for THIS cycle.
+    rows = db.execute(
+        select(BatchApplication.job_id, BatchApplication.profile_id)
+        .where(BatchApplication.batch_id == batch_id)
+    ).all()
+    applied_by: dict[int, set[int]] = {}
+    for job_id, profile_id in rows:
+        applied_by.setdefault(job_id, set()).add(profile_id)
+
+    matrix = matching.overlap_matrix(
+        [{"applied_by": v} for v in applied_by.values()], participants)
+
+    counts = dict(db.execute(
+        select(Assignment.profile_id, func.count(Assignment.id))
+        .where(Assignment.batch_id == batch_id)
+        .group_by(Assignment.profile_id)
+    ).all())
+
+    hit_twice = [job_id for job_id, pids in applied_by.items() if len(pids) > 1]
+    jobs: dict[int, Job] = {}
+    for chunk in _chunks(hit_twice):
+        for job in db.scalars(select(Job).where(Job.id.in_(chunk))):
+            jobs[job.id] = job
+    collisions = [
+        {"title": jobs[job_id].title, "company": jobs[job_id].company,
+         "platform": jobs[job_id].platform, "url": jobs[job_id].url,
+         "applied_by": [profiles[p].name if p in profiles else "?"
+                        for p in applied_by[job_id]]}
+        for job_id in hit_twice if job_id in jobs
+    ]
+
+    return {
+        **batch_json(batch),
+        "participants": _participant_json(participants, profiles, owners, counts=counts),
+        "matrix": {"names": [profiles[p].name if p in profiles else "?" for p in participants],
+                   "rows": [[matrix[a][b] for b in participants] for a in participants]},
+        "collisions": sorted(collisions, key=lambda c: -len(c["applied_by"]))[:400],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Assignments
+# --------------------------------------------------------------------------- #
+
+def _row_json(a: Assignment, j: Job) -> dict:
+    return {"id": a.id, "status": a.status, "title": j.title, "company": j.company,
+            "platform": j.platform, "url": j.url}
+
+
+def _assignment_rows(db: Session, batch_id: int, profile_id: int) -> list[dict]:
+    rows = db.execute(
+        select(Assignment, Job).join(Job, Job.id == Assignment.job_id)
+        .where(Assignment.batch_id == batch_id, Assignment.profile_id == profile_id)
+        .order_by(Job.company, Job.title)
+    ).all()
+    return [_row_json(a, j) for a, j in rows]
+
+
+def _all_assignment_rows(db: Session, batch_id: int) -> dict[int, list[dict]]:
+    """Every profile's sheet in one pass, for the whole-batch workbook."""
+    rows = db.execute(
+        select(Assignment, Job).join(Job, Job.id == Assignment.job_id)
+        .where(Assignment.batch_id == batch_id)
+        .order_by(Job.company, Job.title)
+    ).all()
+    grouped: dict[int, list[dict]] = defaultdict(list)
+    for a, j in rows:
+        grouped[a.profile_id].append(_row_json(a, j))
+    return grouped
+
+
+@app.get("/api/batches/{batch_id}/my-sheets")
+def my_sheets(batch_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Every profile this person runs, each with its own list."""
+    query = select(Profile).where(Profile.is_active == True)  # noqa: E712
+    if user.role != "admin":
+        query = query.where(Profile.user_id == user.id)
+    mine = db.scalars(query.order_by(Profile.name)).all()
+    return {"batch_id": batch_id,
+            "profiles": [{**profile_json(p, user if p.user_id == user.id else None),
+                          "jobs": _assignment_rows(db, batch_id, p.id)} for p in mine]}
+
+
+@app.get("/api/batches/{batch_id}/profiles/{profile_id}/sheet")
+def profile_sheet(batch_id: int, profile_id: int, db: Session = Depends(get_db),
+                  user: User = Depends(current_user)):
+    profile = owned_profile(profile_id, db, user)
+    return {"batch_id": batch_id, "profile": profile_json(profile),
+            "jobs": _assignment_rows(db, batch_id, profile.id)}
+
+
+@app.patch("/api/assignments/{assignment_id}")
+def set_status(assignment_id: int, body: StatusIn, db: Session = Depends(get_db),
+               user: User = Depends(current_user)):
+    row = db.get(Assignment, assignment_id)
+    if not row:
+        raise HTTPException(404, "No such job on your sheet.")
+    owned_profile(row.profile_id, db, user)
+    if body.status not in ("pending", "applied", "skipped"):
+        raise HTTPException(400, "Status must be pending, applied or skipped.")
+    row.status = body.status
+
+    # Marking it applied closes the loop: it counts as this profile's history
+    # from now on, so no later cycle offers it again.
+    if body.status == "applied":
+        exists = db.scalar(select(Application).where(Application.job_id == row.job_id,
+                                                     Application.profile_id == row.profile_id))
+        if not exists:
+            db.add(Application(job_id=row.job_id, profile_id=row.profile_id,
+                               user_id=row.user_id, batch_id=row.batch_id))
+    db.commit()
+    return {"ok": True, "status": row.status}
+
+
+# --------------------------------------------------------------------------- #
+# Downloads
+# --------------------------------------------------------------------------- #
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@app.get("/api/batches/{batch_id}/profiles/{profile_id}/sheet.xlsx")
+def download_profile_sheet(batch_id: int, profile_id: int, db: Session = Depends(get_db),
+                           user: User = Depends(current_user)):
+    profile = owned_profile(profile_id, db, user)
+    jobs = _assignment_rows(db, batch_id, profile.id)
+    if not jobs:
+        raise HTTPException(404, "Nothing has been dispatched to this profile in this batch.")
+    data = exports.assignment_workbook(profile.name, jobs)
+    filename = f"{profile.name.replace(' ', '-').lower()}-batch-{batch_id}.xlsx"
+    return Response(data, media_type=XLSX,
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/batches/{batch_id}/report.xlsx")
+def download_report(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    data = report(batch_id, db, _)
+    grouped = _all_assignment_rows(db, batch_id)
+    per_profile = {p["name"]: grouped.get(p["id"], []) for p in data["participants"]}
+    payload = exports.report_workbook(
+        data["report"], per_profile, data["collisions"],
+        data["matrix"]["names"], data["matrix"]["rows"])
+    return Response(payload, media_type=XLSX,
+                    headers={"Content-Disposition": f'attachment; filename="dispatch-batch-{batch_id}.xlsx"'})
+
+
+@app.get("/api/health")
+def health():
+    return {"ok": True, "time": utcnow().isoformat()}
