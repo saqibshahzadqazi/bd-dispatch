@@ -7,9 +7,11 @@ The unit of work is a profile, not a person — see models.py.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from typing import Iterable, Optional
 
 import bcrypt
@@ -19,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import create_engine, delete, func, insert, select
+from sqlalchemy import create_engine, delete, func, insert, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import exports, ingest, matching
@@ -67,7 +69,22 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 Base.metadata.create_all(engine)
 bring_up_to_date(engine)
 
-app = FastAPI(title="Dispatch", version="2.0.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Keep the lists current without anyone pressing anything."""
+    ticker = asyncio.create_task(_auto_build_loop()) if AUTO_BUILD_TICK_SECONDS > 0 else None
+    try:
+        yield
+    finally:
+        if ticker:
+            ticker.cancel()
+            try:
+                await ticker
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(title="Dispatch", version="2.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in CORS_ORIGINS if o.strip()],
@@ -179,6 +196,7 @@ class BatchIn(BaseModel):
     quota: int = 40
     mode: str = COVER
     one_per_client: bool = False
+    auto_build_minutes: int = 10
 
 
 class MappingIn(BaseModel):
@@ -216,8 +234,10 @@ def profile_json(p: Profile, owner: Optional[User] = None) -> dict:
 def batch_json(b: Batch) -> dict:
     return {"id": b.id, "name": b.name, "status": b.status, "quota": b.quota,
             "mode": b.mode, "one_per_client": b.one_per_client,
+            "auto_build_minutes": b.auto_build_minutes or 0,
             "created_at": b.created_at.isoformat() if b.created_at else None,
             "computed_at": b.computed_at.isoformat() if b.computed_at else None,
+            "last_built_at": b.last_built_at.isoformat() if b.last_built_at else None,
             "report": b.report or {}}
 
 
@@ -364,7 +384,9 @@ def create_batch(body: BatchIn, db: Session = Depends(get_db), admin: User = Dep
         raise HTTPException(400, f"Mode must be one of {', '.join(MODES)}.")
     batch = Batch(name=body.name.strip() or f"Batch {utcnow():%d %b}",
                   quota=max(1, body.quota), mode=body.mode,
-                  one_per_client=body.one_per_client, created_by=admin.id)
+                  one_per_client=body.one_per_client,
+                  auto_build_minutes=max(0, body.auto_build_minutes),
+                  created_by=admin.id)
     db.add(batch)
     db.commit()
     return batch_json(batch)
@@ -555,10 +577,15 @@ def delete_upload(upload_id: int, db: Session = Depends(get_db), user: User = De
 
 @app.post("/api/batches/{batch_id}/compute")
 def compute(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    """Build the lists now. The timer calls build_lists directly."""
     batch = db.get(Batch, batch_id)
     if not batch:
         raise HTTPException(404, "No such batch.")
+    return build_lists(db, batch)
 
+
+def build_lists(db: Session, batch: Batch) -> dict:
+    batch_id = batch.id
     uploads = db.scalars(select(Upload).where(Upload.batch_id == batch_id)).all()
     if len(uploads) < 2:
         raise HTTPException(400, "At least two sheets are needed before anything can be compared.")
@@ -695,12 +722,21 @@ def compute(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admi
     place = matching.cover if batch.mode == COVER else matching.partition
     assigned, stats = place(pool, participants, batch.quota, batch.one_per_client)
 
-    db.execute(delete(Assignment).where(Assignment.batch_id == batch_id))
+    # Only the untouched rows are replaced. A job somebody has already marked
+    # applied or skipped is their record of this cycle's work, and rebuilding —
+    # which now happens on a timer, not just when a manager asks — must not make
+    # it vanish from under them.
+    worked = {(a.profile_id, a.job_id) for a in db.scalars(
+        select(Assignment).where(Assignment.batch_id == batch_id,
+                                 Assignment.status != "pending"))}
+    db.execute(delete(Assignment).where(Assignment.batch_id == batch_id,
+                                        Assignment.status == "pending"))
     db.flush()
     dispatch = [{"batch_id": batch_id, "job_id": job_id, "profile_id": pid,
                  "user_id": owner_of.get(pid), "status": "pending",
                  "exclusive": batch.mode == SPLIT}
-                for pid, job_ids in assigned.items() for job_id in job_ids]
+                for pid, job_ids in assigned.items() for job_id in job_ids
+                if (pid, job_id) not in worked]
     if dispatch:
         db.execute(insert(Assignment), dispatch)
 
@@ -740,13 +776,20 @@ def compute(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admi
         "Jobs put on a list": reached,
         "Places on lists": stats["placements"],
     }
-    batch.status = "computed"
-    batch.computed_at = utcnow()
+    # Building no longer closes the cycle. People keep logging jobs into an open
+    # cycle and the timer keeps the lists current; closing it is a separate act.
+    batch.last_built_at = utcnow()
+    batch.computed_at = batch.last_built_at
     db.commit()
+
+    counts = dict(db.execute(
+        select(Assignment.profile_id, func.count(Assignment.id))
+        .where(Assignment.batch_id == batch_id)
+        .group_by(Assignment.profile_id)).all())
 
     return {
         **batch_json(batch),
-        "participants": _participant_json(participants, profiles, owners, assigned),
+        "participants": _participant_json(participants, profiles, owners, counts=counts),
         "matrix": {"names": [profiles[p].name if p in profiles else "?" for p in participants],
                    "rows": [[matrix[a][b] for b in participants] for a in participants]},
     }
@@ -766,11 +809,111 @@ def _participant_json(participants, profiles, owners, assigned=None, counts=None
     return out
 
 
+@app.post("/api/batches/{batch_id}/close")
+def close_batch(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    """Stop the rebuilds and stop accepting sheets. Lists stay readable."""
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "No such batch.")
+    batch.status = "computed"
+    db.commit()
+    return batch_json(batch)
+
+
+@app.post("/api/batches/{batch_id}/reopen")
+def reopen_batch(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "No such batch.")
+    batch.status = "open"
+    db.commit()
+    return batch_json(batch)
+
+
+# --------------------------------------------------------------------------- #
+# Rebuilding on a timer
+# --------------------------------------------------------------------------- #
+
+AUTO_BUILD_TICK_SECONDS = int(os.getenv("AUTO_BUILD_TICK_SECONDS", "60"))
+# If a build dies mid-flight the claim would block every later one, so a claim
+# older than this is treated as abandoned.
+BUILD_CLAIM_TIMEOUT = dt.timedelta(minutes=15)
+
+
+def _naive_utc(value: Optional[dt.datetime]) -> Optional[dt.datetime]:
+    """SQLite hands back naive datetimes and utcnow() is aware; comparing the
+    two raises. Everything stored is UTC, so drop the marker and compare."""
+    if value is None:
+        return None
+    return value.replace(tzinfo=None) if value.tzinfo else value
+
+
+def _due_for_build(batch: Batch, now: dt.datetime) -> bool:
+    if batch.status != "open" or not batch.auto_build_minutes:
+        return False
+    last = _naive_utc(batch.last_built_at)
+    if last is None:
+        return True
+    return now - last >= dt.timedelta(minutes=batch.auto_build_minutes)
+
+
+def run_due_builds() -> list[int]:
+    """Rebuild every open cycle whose timer has come round. Returns what it built."""
+    built: list[int] = []
+    db = SessionLocal()
+    try:
+        now = _naive_utc(utcnow())
+        open_cycles = db.scalars(select(Batch).where(Batch.status == "open")).all()
+        for batch in open_cycles:
+            if not _due_for_build(batch, now):
+                continue
+
+            # Claim it with a conditional update: whoever's UPDATE matches a row
+            # owns the build. Two workers, or the timer and a manager pressing
+            # the button, cannot both be inside build_lists for one cycle.
+            claimed = db.execute(
+                update(Batch)
+                .where(Batch.id == batch.id,
+                       or_(Batch.building_since.is_(None),
+                           Batch.building_since < now - BUILD_CLAIM_TIMEOUT))
+                .values(building_since=now))
+            db.commit()
+            if claimed.rowcount != 1:
+                continue
+
+            try:
+                build_lists(db, batch)
+                built.append(batch.id)
+            except HTTPException:
+                pass                    # fewer than two sheets yet; try again next tick
+            except Exception as exc:    # noqa: BLE001 — one bad cycle must not stop the rest
+                db.rollback()
+                print(f"auto-build failed for cycle {batch.id}: {exc}")
+            finally:
+                db.execute(update(Batch).where(Batch.id == batch.id)
+                           .values(building_since=None))
+                db.commit()
+    finally:
+        db.close()
+    return built
+
+
+async def _auto_build_loop() -> None:
+    while True:
+        await asyncio.sleep(AUTO_BUILD_TICK_SECONDS)
+        try:
+            await asyncio.to_thread(run_due_builds)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:        # noqa: BLE001
+            print("auto-build tick failed:", exc)
+
+
 @app.get("/api/batches/{batch_id}/report")
 def report(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admin_only)):
     batch = db.get(Batch, batch_id)
-    if not batch or batch.status != "computed":
-        raise HTTPException(404, "That batch has not been computed yet.")
+    if not batch or not batch.last_built_at:
+        raise HTTPException(404, "That batch has not been built yet.")
 
     profiles = {p.id: p for p in db.scalars(select(Profile)).all()}
     owners = {u.id: u.name for u in db.scalars(select(User)).all()}

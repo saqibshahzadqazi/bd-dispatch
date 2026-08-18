@@ -72,7 +72,17 @@ Two profiles sharing a headline is not a problem to solve. It is the normal case
    unworked on a participating profile's list from an earlier cycle. A job
    somebody ran out of time for does not fall through the cracks.
 
-4. **Each profile is given what it has not used.** Two modes, chosen when you
+4. **The lists rebuild themselves.** A cycle stays open while the team works it.
+   Every few minutes — you pick 5, 10, 15 or 30 when opening it — the server
+   rebuilds every open cycle that has at least two sheets in it. Nobody presses
+   anything: a job Ali logs at two o'clock is off the other profiles' lists by
+   ten past.
+
+   Rebuilding never disturbs work already done. Jobs a profile has marked
+   **applied** or **skipped** keep their place and their status; only the
+   untouched rows are recalculated. Closing the cycle is what stops the timer.
+
+5. **Each profile is given what it has not used.** Two modes, chosen when you
    open the cycle:
 
    - **Cover every profile** (default) — each profile gets every pooled job it
@@ -84,7 +94,7 @@ Two profiles sharing a headline is not a problem to solve. It is the normal case
    A quota caps each list. When it bites, the jobs almost nobody is eligible for
    go out first, so a rare opening is not lost to a job everyone could have taken.
 
-5. **The database holds the line.** `assignments` is unique on
+6. **The database holds the line.** `assignments` is unique on
    (batch, job, profile), so one cycle can never put the same job on one
    profile's list twice. Split cycles additionally carry a partial unique index
    on (batch, job) — so even with a bug, or two managers pressing the button at
@@ -198,14 +208,22 @@ colleague's machine.
 1. Sign in as manager → **People and profiles**. Add your team, then add a
    profile for each identity you apply under and say who runs it. Delete the
    samples.
-2. **Batches** → open a cycle. Pick the mode. Set the cap.
-3. Each person signs in, picks the profile they are working as, and drops that
-   profile's sheet. Any column layout works — the mapper guesses, and they can
-   correct it.
-4. Once everyone has handed in, press **Build the lists**.
-5. Each profile's list can be worked in the browser or downloaded as Excel.
-   Marking jobs **applied** or **skipped** as you go is what keeps the next
-   cycle accurate.
+2. **Batches** → open a cycle. Pick the mode, the cap, and how often the lists
+   should rebuild. Then leave it alone.
+3. Each person signs in and picks the profile they are working as. Two tabs:
+   - **Jobs I applied to** — either *Add manually*, which gives a table where
+     every **+ New entry** adds a row stamped with the current Eastern time, or
+     *Upload a sheet* for anyone who already keeps a spreadsheet. Any column
+     layout works; the mapper guesses and they can correct it.
+   - **New jobs** — what this profile has never applied to, refreshed as the
+     lists rebuild.
+4. Nobody needs to press anything. The lists rebuild on the timer as sheets
+   arrive; **Build now** is there if you want it immediately.
+5. Work the list in the browser or download it as Excel. Marking jobs
+   **applied** or **skipped** as you go is what keeps the next cycle accurate,
+   and those marks survive every rebuild.
+6. **Close cycle** when the round is done. That stops the rebuilds and stops
+   accepting sheets. Reopen it if you closed too early.
 
 Sheets can be any of `.xlsx`, `.xls`, `.csv`, `.tsv`. Only five columns are
 read; everything else is ignored.
@@ -267,6 +285,19 @@ npm run build          # serve frontend/dist with nginx, proxy /api to :8000
 
 Put nginx in front with a Let's Encrypt certificate. `frontend/nginx.conf`
 already has the proxy rule.
+
+### The rebuild timer, when hosted
+
+The timer runs inside the app process, so it only ticks while the app is awake.
+On a plan that sleeps when idle — Render's free tier, for one — a cycle left
+untouched overnight will not rebuild until someone next opens the page, at which
+point it catches up on the first tick. Anything always-on rebuilds exactly on
+schedule.
+
+`AUTO_BUILD_TICK_SECONDS` sets how often it looks for due cycles (60 by
+default); `0` switches the timer off entirely. Running several workers is safe:
+a cycle is claimed with a conditional update before it is built, so only one
+worker builds it.
 
 ### Before it faces the internet
 

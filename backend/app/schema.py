@@ -22,14 +22,46 @@ from .models import Base
 REKEYED = ("uploads", "applications", "batch_applications", "assignments")
 
 
+# Columns added after a table first shipped. create_all only ever creates
+# missing tables, never missing columns, so these are added by hand. Additive
+# and idempotent: a fresh database already has them and nothing happens.
+LATER_COLUMNS = {
+    "batches": [
+        ("auto_build_minutes", "INTEGER DEFAULT 10"),
+        ("last_built_at", "TIMESTAMP"),
+        ("building_since", "TIMESTAMP"),
+    ],
+}
+
+
 def bring_up_to_date(engine: Engine) -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     if "uploads" not in tables:
         return                                   # fresh database; create_all did it all
-    if "profile_id" in {c["name"] for c in inspector.get_columns("uploads")}:
-        return                                   # already v2
-    _upgrade_from_v1(engine)
+    if "profile_id" not in {c["name"] for c in inspector.get_columns("uploads")}:
+        _upgrade_from_v1(engine)
+    _add_later_columns(engine)
+
+
+def _add_later_columns(engine: Engine) -> None:
+    for table, columns in LATER_COLUMNS.items():
+        if table not in set(inspect(engine).get_table_names()):
+            continue
+        present = {c["name"] for c in inspect(engine).get_columns(table)}
+        missing = [(name, ddl) for name, ddl in columns if name not in present]
+        if not missing:
+            continue
+        with engine.begin() as conn:
+            for name, ddl in missing:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+        # A cycle that predates automatic building has been built at least once
+        # if it was ever marked computed, so say so rather than leaving the
+        # timer to treat it as brand new.
+        if table == "batches" and any(n == "last_built_at" for n, _ in missing):
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE batches SET last_built_at = computed_at "
+                                  "WHERE last_built_at IS NULL AND computed_at IS NOT NULL"))
 
 
 def _upgrade_from_v1(engine: Engine) -> None:

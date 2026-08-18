@@ -37,6 +37,18 @@ function Matrix({ names, rows }) {
   );
 }
 
+/** "just now", "4 minutes ago", "2 hours ago" — enough to trust the numbers. */
+function sinceText(iso) {
+  const then = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : `${iso}Z`);
+  const seconds = Math.max(0, Math.round((Date.now() - then.getTime()) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  return then.toLocaleString();
+}
+
 export default function AdminHome() {
   const [batches, setBatches] = useState([]);
   const [current, setCurrent] = useState(null);
@@ -44,7 +56,20 @@ export default function AdminHome() {
   const [report, setReport] = useState(null);
   const [note, setNote] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [draft, setDraft] = useState({ name: "", quota: 40, mode: "cover", one_per_client: false });
+  const [draft, setDraft] = useState({
+    name: "", quota: 40, mode: "cover", one_per_client: false, auto_build_minutes: 10,
+  });
+
+  // Rebuilds happen on the server whether or not anyone is looking, so the
+  // screen refreshes itself to stay honest about what the lists contain.
+  useEffect(() => {
+    if (!current) return undefined;
+    const tick = setInterval(() => {
+      api.report(current).then(setReport).catch(() => {});
+      api.getBatch(current).then(setDetail).catch(() => {});
+    }, 30000);
+    return () => clearInterval(tick);
+  }, [current]);
 
   const refresh = useCallback(async (selectId) => {
     const rows = await api.listBatches();
@@ -71,10 +96,15 @@ export default function AdminHome() {
         quota: Number(draft.quota) || 40,
         mode: draft.mode,
         one_per_client: draft.one_per_client,
+        auto_build_minutes: Number(draft.auto_build_minutes),
       });
-      setDraft({ name: "", quota: 40, mode: draft.mode, one_per_client: false });
+      setDraft({ ...draft, name: "", quota: 40, one_per_client: false });
       await refresh(batch.id);
-      setNote({ text: `${batch.name} is open. Everyone can hand in their sheets now.` });
+      setNote({
+        text: batch.auto_build_minutes
+          ? `${batch.name} is open. Lists rebuild every ${batch.auto_build_minutes} minutes on their own — you do not need to come back.`
+          : `${batch.name} is open. You will need to build the lists yourself.`,
+      });
     } catch (err) {
       setNote({ bad: true, text: err.message });
     } finally {
@@ -94,6 +124,37 @@ export default function AdminHome() {
       const full = await api.report(current).catch(() => data);
       setReport(full);
       setNote({ text: `Lists built. ${data.report["Jobs dispatched"]} jobs went out across ${data.participants.length} people.` });
+    } catch (err) {
+      setNote({ bad: true, text: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const finish = async () => {
+    if (!window.confirm(
+      "Close this cycle? No more sheets are accepted and the lists stop rebuilding. " +
+      "Everyone keeps what they already have.")) return;
+    setBusy(true);
+    try {
+      await api.closeBatch(current);
+      await refresh(current);
+      setDetail(await api.getBatch(current));
+      setNote({ text: "Cycle closed. Open a new one when the next round starts." });
+    } catch (err) {
+      setNote({ bad: true, text: err.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reopen = async () => {
+    setBusy(true);
+    try {
+      await api.reopenBatch(current);
+      await refresh(current);
+      setDetail(await api.getBatch(current));
+      setNote({ text: "Cycle reopened. Sheets are accepted again and rebuilding resumes." });
     } catch (err) {
       setNote({ bad: true, text: err.message });
     } finally {
@@ -141,6 +202,17 @@ export default function AdminHome() {
                    onChange={(e) => setDraft({ ...draft, one_per_client: e.target.checked })} />
             One job per client, per profile
           </label>
+          <label>
+            Rebuild lists
+            <select value={draft.auto_build_minutes} style={{ marginLeft: 6 }}
+                    onChange={(e) => setDraft({ ...draft, auto_build_minutes: e.target.value })}>
+              <option value={5}>every 5 minutes</option>
+              <option value={10}>every 10 minutes</option>
+              <option value={15}>every 15 minutes</option>
+              <option value={30}>every 30 minutes</option>
+              <option value={0}>only when I ask</option>
+            </select>
+          </label>
           <button onClick={create} disabled={busy}>Open cycle</button>
         </div>
 
@@ -182,12 +254,37 @@ export default function AdminHome() {
               <span className="pill">
                 {detail.mode === "split" ? "split the pool" : "cover every profile"}
               </span>
-              <span className={detail.status === "open" ? "pill" : "pill on"}>{detail.status}</span>
-              <button onClick={compute} disabled={busy || handedIn < 2}>
-                {busy ? "Working…" : detail.status === "computed" ? "Rebuild lists" : "Build the lists"}
+              <span className={detail.status === "open" ? "pill" : "pill on"}>
+                {detail.status === "open" ? "open" : "closed"}
+              </span>
+              <button className="ghost" onClick={compute} disabled={busy || handedIn < 2}>
+                {busy ? "Working…" : "Build now"}
               </button>
+              {detail.status === "open"
+                ? <button onClick={finish} disabled={busy}>Close cycle</button>
+                : <button className="ghost" onClick={reopen} disabled={busy}>Reopen</button>}
             </div>
           </div>
+
+          {detail.status === "open" && detail.auto_build_minutes > 0 && (
+            <div className="notice ok">
+              <b>Building itself.</b> The lists rebuild every {detail.auto_build_minutes} minutes
+              while this cycle is open, so whatever your team has logged is already reflected.
+              {detail.last_built_at
+                ? ` Last built ${sinceText(detail.last_built_at)}.`
+                : handedIn < 2
+                  ? " Nothing built yet — it starts once two profiles have handed in."
+                  : " First build is due within a minute."}
+              {" "}Close the cycle when the week is done.
+            </div>
+          )}
+
+          {detail.status === "open" && !detail.auto_build_minutes && (
+            <div className="notice">
+              This cycle only builds when you press <b>Build now</b>.
+              {detail.last_built_at && ` Last built ${sinceText(detail.last_built_at)}.`}
+            </div>
+          )}
 
           {handedIn < 2 && (
             <div className="notice">

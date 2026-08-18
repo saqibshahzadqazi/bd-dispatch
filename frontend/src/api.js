@@ -93,6 +93,8 @@ export const api = {
   createBatch: (payload) => request("/batches", { method: "POST", body: payload }),
   getBatch: (id) => request(`/batches/${id}`),
   compute: (id) => request(`/batches/${id}/compute`, { method: "POST" }),
+  closeBatch: (id) => request(`/batches/${id}/close`, { method: "POST" }),
+  reopenBatch: (id) => request(`/batches/${id}/reopen`, { method: "POST" }),
   report: (id) => request(`/batches/${id}/report`),
 
   upload: (batchId, profileId, file) => {

@@ -103,9 +103,12 @@ def sheet(job_ids, tracking=False):
     return out.getvalue().encode()
 
 
-def open_cycle(client, admin, name, mode="cover", quota=500, one_per_client=False):
+def open_cycle(client, admin, name, mode="cover", quota=500, one_per_client=False,
+               auto_build_minutes=0):
+    """Cycles default to no timer here so tests build when they mean to."""
     response = client.post("/api/batches", json={"name": name, "mode": mode, "quota": quota,
-                                                 "one_per_client": one_per_client},
+                                                 "one_per_client": one_per_client,
+                                                 "auto_build_minutes": auto_build_minutes},
                            headers=admin)
     assert response.status_code == 201, response.text
     return response.json()["id"]
@@ -389,18 +392,101 @@ def test_a_bd_cannot_type_into_someone_elses_profile(client, admin, seeded):
     assert denied.status_code == 403
 
 
-def test_typing_is_refused_once_the_cycle_is_computed(client, admin, new_profile):
+def test_building_keeps_the_cycle_open_but_closing_shuts_it(client, admin, new_profile):
+    """Lists are rebuilt on a timer while a cycle runs, so a build must not lock
+    anyone out. Only closing the cycle does that."""
     one = new_profile("ali@example.com")
     two = new_profile("sara@example.com")
-    batch_id = open_cycle(client, admin, "Typed closed")
-    hand_in(client, batch_id, token(client, "ali@example.com"), one, sheet(range(9200, 9205)))
+    ali = token(client, "ali@example.com")
+    batch_id = open_cycle(client, admin, "Still open")
+    hand_in(client, batch_id, ali, one, sheet(range(9200, 9205)))
     hand_in(client, batch_id, token(client, "sara@example.com"), two, sheet(range(9205, 9210)))
+    built = client.post(f"/api/batches/{batch_id}/compute", headers=admin).json()
+    assert built["status"] == "open" and built["last_built_at"]
+
+    more = client.put(f"/api/batches/{batch_id}/profiles/{one}/entries",
+                      json={"rows": [{"url": "https://www.upwork.com/jobs/~01000000000000abcd",
+                                      "title": "Late one", "company": "Acme"}]},
+                      headers=ali)
+    assert more.status_code == 200, "an open cycle keeps taking jobs after a build"
+
+    assert client.post(f"/api/batches/{batch_id}/close", headers=admin).json()["status"] == "computed"
+    late = client.put(f"/api/batches/{batch_id}/profiles/{one}/entries",
+                      json={"rows": [{"url": "https://www.upwork.com/jobs/~01000000000000abce"}]},
+                      headers=ali)
+    assert late.status_code == 400
+
+
+def test_a_rebuild_keeps_work_people_have_marked(client, admin, new_profile):
+    """The timer rebuilds behind people's backs. A job someone marked applied
+    is their record of this cycle and must survive that."""
+    one = new_profile("ali@example.com")
+    two = new_profile("sara@example.com")
+    ali = token(client, "ali@example.com")
+    batch_id = open_cycle(client, admin, "Marks survive")
+    hand_in(client, batch_id, ali, one, sheet(range(9500, 9510)))
+    hand_in(client, batch_id, token(client, "sara@example.com"), two, sheet(range(9510, 9520)))
     client.post(f"/api/batches/{batch_id}/compute", headers=admin)
 
-    late = client.put(f"/api/batches/{batch_id}/profiles/{one}/entries",
-                      json={"rows": [{"url": "https://www.upwork.com/jobs/~01000000000000abcd"}]},
-                      headers=token(client, "ali@example.com"))
-    assert late.status_code == 400
+    mine = listing(client, batch_id, one, ali)
+    assert len(mine) == 10
+    client.patch(f"/api/assignments/{mine[0]['id']}", json={"status": "applied"}, headers=ali)
+    client.patch(f"/api/assignments/{mine[1]['id']}", json={"status": "skipped"}, headers=ali)
+
+    client.post(f"/api/batches/{batch_id}/compute", headers=admin)
+    after = listing(client, batch_id, one, ali)
+    marks = {job["id"]: job["status"] for job in after}
+    assert marks.get(mine[0]["id"]) == "applied", "an applied job disappeared on rebuild"
+    assert marks.get(mine[1]["id"]) == "skipped", "a skipped job disappeared on rebuild"
+    assert len(after) == 10, "the rest of the list is unchanged"
+
+
+def test_the_timer_builds_an_open_cycle_on_its_own(client, admin, new_profile):
+    """No manager, no button — run_due_builds is what the background loop calls."""
+    from app.main import run_due_builds
+
+    one = new_profile("ali@example.com")
+    two = new_profile("sara@example.com")
+    ali = token(client, "ali@example.com")
+    batch_id = open_cycle(client, admin, "Hands off", auto_build_minutes=10)
+    hand_in(client, batch_id, ali, one, sheet(range(9600, 9610)))
+    hand_in(client, batch_id, token(client, "sara@example.com"), two, sheet(range(9610, 9620)))
+
+    assert listing(client, batch_id, one, ali) == [], "nothing built yet"
+    assert batch_id in run_due_builds(), "a never-built open cycle is due immediately"
+    assert len(listing(client, batch_id, one, ali)) == 10
+
+    # Just built, so the timer leaves it alone until the interval is up.
+    assert batch_id not in run_due_builds()
+
+    # And it stops entirely once the cycle is closed.
+    client.post(f"/api/batches/{batch_id}/close", headers=admin)
+    from app.main import SessionLocal
+    from app.models import Batch
+    db = SessionLocal()
+    try:
+        batch = db.get(Batch, batch_id)
+        batch.last_built_at = None
+        db.commit()
+    finally:
+        db.close()
+    assert batch_id not in run_due_builds(), "a closed cycle must not be rebuilt"
+
+
+def test_turning_the_timer_off_leaves_it_to_the_manager(client, admin, new_profile):
+    from app.main import run_due_builds
+
+    one = new_profile("ali@example.com")
+    two = new_profile("sara@example.com")
+    ali = token(client, "ali@example.com")
+    batch_id = open_cycle(client, admin, "Manual only", auto_build_minutes=0)
+    hand_in(client, batch_id, ali, one, sheet(range(9700, 9710)))
+    hand_in(client, batch_id, token(client, "sara@example.com"), two, sheet(range(9710, 9720)))
+
+    assert batch_id not in run_due_builds()
+    assert listing(client, batch_id, one, ali) == []
+    client.post(f"/api/batches/{batch_id}/compute", headers=admin)
+    assert len(listing(client, batch_id, one, ali)) == 10
 
 
 def test_profile_names_must_be_unique(client, admin):

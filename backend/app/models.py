@@ -97,7 +97,13 @@ class Profile(Base):
 
 
 class Batch(Base):
-    """One dispatch cycle. Sheets go in, lists come out."""
+    """One dispatch cycle. Sheets go in, lists come out.
+
+    A cycle stays `open` while people are still working it: sheets keep
+    arriving and the lists are rebuilt on a timer, so a job somebody logs at
+    two o'clock is off everyone else's list by ten past. Closing it is a
+    separate, deliberate act — that is what stops the rebuilds.
+    """
     __tablename__ = "batches"
     id = Column(Integer, primary_key=True)
     name = Column(String(160), nullable=False)
@@ -109,6 +115,13 @@ class Batch(Base):
     created_at = Column(DateTime, default=utcnow)
     computed_at = Column(DateTime, nullable=True)
     report = Column(JSON, default=dict)
+
+    # Minutes between automatic rebuilds; 0 means only when asked.
+    auto_build_minutes = Column(Integer, nullable=False, default=10)
+    last_built_at = Column(DateTime, nullable=True)
+    # Held for the duration of a build so two workers, or a manager and the
+    # timer, cannot rebuild the same cycle at once.
+    building_since = Column(DateTime, nullable=True)
 
 
 class Upload(Base):

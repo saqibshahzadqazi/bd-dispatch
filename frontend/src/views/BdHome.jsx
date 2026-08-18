@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, download, safeUrl } from "../api.js";
 import EntryTable from "./EntryTable.jsx";
 
@@ -62,7 +62,7 @@ export default function BdHome() {
       .catch(() => {});
   }, [batchId, profileId]);
 
-  useEffect(() => {
+  const loadSheets = useCallback(() => {
     if (!batchId) return;
     api.mySheets(batchId)
       .then((data) => {
@@ -72,6 +72,19 @@ export default function BdHome() {
       })
       .catch(() => setSheets({}));
   }, [batchId]);
+
+  useEffect(() => { loadSheets(); }, [loadSheets]);
+
+  // The server rebuilds these lists on a timer, so what is on screen goes stale
+  // on its own. Pick up the new one rather than waiting for a reload.
+  useEffect(() => {
+    if (!batchId) return undefined;
+    const tick = setInterval(() => {
+      loadSheets();
+      api.listBatches().then(setBatches).catch(() => {});
+    }, 60000);
+    return () => clearInterval(tick);
+  }, [batchId, loadSheets]);
 
   const send = async (file) => {
     if (!file || !batchId || !profileId) return;
@@ -312,9 +325,11 @@ export default function BdHome() {
 
               {sheet.length === 0 ? (
                 <div className="notice">
-                  {batch.status === "open"
-                    ? "This cycle is still open. Once everyone has handed in and your manager builds the lists, your new jobs appear here."
-                    : "Nothing was dispatched to this profile in this cycle."}
+                  {batch.status !== "open"
+                    ? "Nothing was dispatched to this profile in this cycle."
+                    : batch.auto_build_minutes
+                      ? `This cycle is still open. The lists rebuild every ${batch.auto_build_minutes} minutes once at least two profiles have handed in — yours will appear here on its own.`
+                      : "This cycle is still open. Your jobs appear here once your manager builds the lists."}
                 </div>
               ) : (
                 <>
@@ -351,6 +366,11 @@ export default function BdHome() {
                   <p className="muted">
                     Anything left as <b>to do</b> comes back next cycle. Marking a job
                     <b> applied</b> or <b> skipped</b> retires it from this profile for good.
+                    {batch.status === "open" && batch.auto_build_minutes > 0 && (
+                      <> This list refreshes every {batch.auto_build_minutes} minutes as
+                      colleagues log their work, so jobs may drop off — anything you have already
+                      marked stays put.</>
+                    )}
                   </p>
                 </>
               )}
