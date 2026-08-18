@@ -105,6 +105,11 @@ export const api = {
     request(`/uploads/${uploadId}/mapping`, { method: "PATCH", body: { mapping } }),
   deleteUpload: (uploadId) => request(`/uploads/${uploadId}`, { method: "DELETE" }),
 
+  listEntries: (batchId, profileId) =>
+    request(`/batches/${batchId}/profiles/${profileId}/entries`),
+  saveEntries: (batchId, profileId, rows) =>
+    request(`/batches/${batchId}/profiles/${profileId}/entries`, { method: "PUT", body: { rows } }),
+
   mySheets: (batchId) => request(`/batches/${batchId}/my-sheets`),
   setStatus: (assignmentId, status) =>
     request(`/assignments/${assignmentId}`, { method: "PATCH", body: { status } }),

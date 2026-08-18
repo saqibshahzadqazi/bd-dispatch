@@ -271,6 +271,94 @@ def test_one_person_can_run_two_profiles_independently(client, admin, new_profil
     assert {p["id"] for p in sheets["profiles"]} >= {first, second}
 
 
+def test_jobs_can_be_typed_in_instead_of_uploaded(client, admin, new_profile):
+    """A BD with no spreadsheet types rows on screen; they must reach the cycle
+    exactly as an uploaded sheet would."""
+    typed = new_profile("ali@example.com")
+    other = new_profile("sara@example.com")
+    ali = token(client, "ali@example.com")
+
+    batch_id = open_cycle(client, admin, "Typed")
+    empty = client.get(f"/api/batches/{batch_id}/profiles/{typed}/entries", headers=ali)
+    assert empty.status_code == 200 and empty.json()["rows"] == []
+
+    rows = [{"url": f"https://www.upwork.com/jobs/~01{n:016x}",
+             "title": f"Role {n}", "company": f"Client {n}",
+             "platform": "Upwork", "date": "2026-08-01"} for n in range(9000, 9006)]
+    rows.append({"url": "", "title": "", "company": "", "platform": "", "date": ""})
+    saved = client.put(f"/api/batches/{batch_id}/profiles/{typed}/entries",
+                       json={"rows": rows}, headers=ali)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["row_count"] == 6, "the blank row should not be stored"
+
+    # It reads back, and the manager sees it as a handed-in sheet.
+    back = client.get(f"/api/batches/{batch_id}/profiles/{typed}/entries", headers=ali).json()
+    assert len(back["rows"]) == 6 and back["typed"] is True
+    handed = client.get(f"/api/batches/{batch_id}", headers=admin).json()["uploads"]
+    assert any(u["profile_id"] == typed and u["row_count"] == 6 for u in handed)
+
+    # And it dispatches like any other sheet.
+    hand_in(client, batch_id, token(client, "sara@example.com"), other, sheet(range(9100, 9110)))
+    data = client.post(f"/api/batches/{batch_id}/compute", headers=admin).json()
+    handed = {p["id"]: p["assigned"] for p in data["participants"]}
+    assert handed[typed] == 10, "the typed profile gets the ten it has not tried"
+    assert handed[other] == 6, "the other profile gets the six that were typed in"
+
+
+def test_opening_the_entry_screen_does_not_hand_anything_in(client, admin, new_profile):
+    """Clicking into the table and away must not leave an empty sheet behind —
+    the manager would read that as a profile having reported in."""
+    typed = new_profile("ali@example.com")
+    ali = token(client, "ali@example.com")
+    batch_id = open_cycle(client, admin, "Typed empty")
+
+    blank = client.put(f"/api/batches/{batch_id}/profiles/{typed}/entries",
+                       json={"rows": [{"url": "", "title": "", "company": ""}]}, headers=ali)
+    assert blank.status_code == 200 and blank.json()["row_count"] == 0
+    assert client.get(f"/api/batches/{batch_id}", headers=admin).json()["uploads"] == []
+
+    # And clearing a real sheet takes it back out again.
+    client.put(f"/api/batches/{batch_id}/profiles/{typed}/entries",
+               json={"rows": [{"url": "https://www.upwork.com/jobs/~01000000000000beef"}]},
+               headers=ali)
+    assert len(client.get(f"/api/batches/{batch_id}", headers=admin).json()["uploads"]) == 1
+    client.put(f"/api/batches/{batch_id}/profiles/{typed}/entries", json={"rows": []}, headers=ali)
+    assert client.get(f"/api/batches/{batch_id}", headers=admin).json()["uploads"] == []
+
+
+def test_typed_entries_reject_a_dangerous_link(client, admin, new_profile):
+    typed = new_profile("ali@example.com")
+    ali = token(client, "ali@example.com")
+    batch_id = open_cycle(client, admin, "Typed hostile")
+    client.put(f"/api/batches/{batch_id}/profiles/{typed}/entries",
+               json={"rows": [{"url": "javascript:alert(1)", "title": "X", "company": "Y"}]},
+               headers=ali)
+    back = client.get(f"/api/batches/{batch_id}/profiles/{typed}/entries", headers=ali).json()
+    assert back["rows"][0]["url"] == "", "a javascript: link must not survive being typed in"
+
+
+def test_a_bd_cannot_type_into_someone_elses_profile(client, admin, seeded):
+    batch_id = open_cycle(client, admin, "Typed boundary")
+    denied = client.put(f"/api/batches/{batch_id}/profiles/{seeded['Zahid']}/entries",
+                        json={"rows": [{"url": "https://x.com/jobs/1234567"}]},
+                        headers=token(client, "ali@example.com"))
+    assert denied.status_code == 403
+
+
+def test_typing_is_refused_once_the_cycle_is_computed(client, admin, new_profile):
+    one = new_profile("ali@example.com")
+    two = new_profile("sara@example.com")
+    batch_id = open_cycle(client, admin, "Typed closed")
+    hand_in(client, batch_id, token(client, "ali@example.com"), one, sheet(range(9200, 9205)))
+    hand_in(client, batch_id, token(client, "sara@example.com"), two, sheet(range(9205, 9210)))
+    client.post(f"/api/batches/{batch_id}/compute", headers=admin)
+
+    late = client.put(f"/api/batches/{batch_id}/profiles/{one}/entries",
+                      json={"rows": [{"url": "https://www.upwork.com/jobs/~01000000000000abcd"}]},
+                      headers=token(client, "ali@example.com"))
+    assert late.status_code == 400
+
+
 def test_profile_names_must_be_unique(client, admin):
     clash = client.post("/api/profiles", json={"name": "khuram", "headline": "AI"},
                         headers=admin)

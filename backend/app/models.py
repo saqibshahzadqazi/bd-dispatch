@@ -29,6 +29,7 @@ The constraints that carry the product:
 from __future__ import annotations
 
 import datetime as dt
+import os
 
 from sqlalchemy import (JSON, Boolean, Column, DateTime, ForeignKey, Index,
                         Integer, String, Text, UniqueConstraint)
@@ -41,8 +42,28 @@ SPLIT = "split"      # one job goes to exactly one profile
 MODES = (COVER, SPLIT)
 
 
+# The team works to Eastern time, so that is what "applied on" means. Stored
+# timestamps stay UTC; this is only for the stamp a person reads. Change it here
+# and in the browser app's EntryTable if the team ever moves.
+WORKING_TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
+
+
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def applied_stamp() -> str:
+    """Today's date and time where the team actually works.
+
+    ZoneInfo needs the tzdata package on Windows, and a machine without it
+    should not take the app down over a cosmetic timestamp — hence the fallback.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        now = dt.datetime.now(ZoneInfo(WORKING_TIMEZONE))
+    except Exception:
+        now = dt.datetime.now()
+    return now.strftime("%Y-%m-%d %H:%M")
 
 
 class User(Base):

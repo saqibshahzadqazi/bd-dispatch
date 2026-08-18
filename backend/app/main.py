@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import exports, ingest, matching
 from .models import (COVER, MODES, SPLIT, Application, Assignment, Base, Batch,
-                     BatchApplication, Job, Profile, Upload, User, utcnow)
+                     BatchApplication, Job, Profile, Upload, User,
+                     applied_stamp, utcnow)
 from .schema import bring_up_to_date
 
 def _database_url() -> str:
@@ -182,6 +183,18 @@ class BatchIn(BaseModel):
 
 class MappingIn(BaseModel):
     mapping: dict
+
+
+class EntryIn(BaseModel):
+    url: str = ""
+    title: str = ""
+    company: str = ""
+    platform: str = ""
+    date: str = ""
+
+
+class EntriesIn(BaseModel):
+    rows: list[EntryIn]
 
 
 class StatusIn(BaseModel):
@@ -440,6 +453,88 @@ def set_mapping(upload_id: int, body: MappingIn, db: Session = Depends(get_db),
     return {"ok": True, "mapping": upload.mapping}
 
 
+# --------------------------------------------------------------------------- #
+# Typing jobs in by hand — the same sheet, entered a row at a time
+# --------------------------------------------------------------------------- #
+
+# Column names used when a profile's sheet is typed rather than uploaded. The
+# mapping is then the identity, so hand-entered and uploaded sheets travel
+# through exactly the same code from here on.
+TYPED_HEADERS = {"url": "Job link", "title": "Job title", "company": "Client",
+                 "platform": "Platform", "date": "Applied on"}
+
+
+@app.get("/api/batches/{batch_id}/profiles/{profile_id}/entries")
+def list_entries(batch_id: int, profile_id: int, db: Session = Depends(get_db),
+                 user: User = Depends(current_user)):
+    profile = owned_profile(profile_id, db, user)
+    upload = db.scalar(select(Upload).where(Upload.batch_id == batch_id,
+                                            Upload.profile_id == profile.id))
+    if not upload:
+        return {"rows": [], "filename": None, "row_count": 0, "typed": True}
+    rows = ingest.project_rows(upload.rows or [], upload.mapping or {})
+    return {"rows": rows, "filename": upload.filename, "row_count": len(rows),
+            "typed": (upload.mapping or {}) == TYPED_HEADERS}
+
+
+@app.put("/api/batches/{batch_id}/profiles/{profile_id}/entries")
+def save_entries(batch_id: int, profile_id: int, body: EntriesIn,
+                 db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Replace this profile's sheet with what is on screen.
+
+    Saving rewrites the sheet in canonical columns. For a sheet that arrived as
+    a file that means any extra columns are dropped — only these five are ever
+    read anyway, and the alternative is an editor that quietly disagrees with
+    what is stored.
+    """
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(404, "No such batch.")
+    if batch.status != "open":
+        raise HTTPException(400, "This cycle is closed. Ask your manager to open a new one.")
+    profile = owned_profile(profile_id, db, user)
+
+    if len(body.rows) > ingest.MAX_ROWS:
+        raise HTTPException(413, f"That is over {ingest.MAX_ROWS} rows. Upload it as a file instead.")
+
+    kept = []
+    for entry in body.rows:
+        record = {"url": ingest.safe_url(entry.url), "title": entry.title.strip(),
+                  "company": entry.company.strip(), "platform": entry.platform.strip(),
+                  "date": entry.date.strip()}
+        if any(record.values()):                       # a wholly blank row is not a row
+            kept.append({TYPED_HEADERS[key]: value for key, value in record.items()})
+
+    upload = db.scalar(select(Upload).where(Upload.batch_id == batch_id,
+                                            Upload.profile_id == profile.id))
+
+    if not kept:
+        # Nothing typed is nothing handed in. Without this, opening the entry
+        # screen and clicking away would leave an empty sheet behind, which the
+        # manager would see as a profile having reported in.
+        if upload is not None:
+            db.delete(upload)
+            db.commit()
+        return {"ok": True, "row_count": 0, "usable": 0, "filename": None}
+
+    if upload is None:
+        upload = Upload(batch_id=batch_id, profile_id=profile.id, user_id=user.id,
+                        filename="Typed in")
+        db.add(upload)
+    elif upload.mapping != TYPED_HEADERS:
+        upload.filename = f"{upload.filename} (edited)" if upload.filename else "Typed in"
+    upload.headers = list(TYPED_HEADERS.values())
+    upload.mapping = dict(TYPED_HEADERS)
+    upload.rows = kept
+    upload.row_count = len(kept)
+    upload.user_id = user.id
+    db.commit()
+
+    usable = sum(1 for row in ingest.apply_mapping(kept, TYPED_HEADERS))
+    return {"ok": True, "row_count": len(kept), "usable": usable,
+            "filename": upload.filename}
+
+
 @app.delete("/api/uploads/{upload_id}")
 def delete_upload(upload_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
     upload = db.get(Upload, upload_id)
@@ -517,9 +612,13 @@ def compute(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admi
         db.flush()
 
     applied_by: dict[int, set[int]] = {}
+    applied_on: dict[tuple[int, int], str] = {}
     for record in records:
         job = seen[record["fp"]]
         applied_by.setdefault(job.id, set()).add(record["profile_id"])
+        stamp = (record.get("date") or "").strip()
+        if stamp:
+            applied_on.setdefault((job.id, record["profile_id"]), stamp[:40])
 
     owner_of = {p.id: p.user_id for p in db.scalars(select(Profile)).all()}
 
@@ -530,7 +629,7 @@ def compute(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admi
             .where(Application.job_id.in_(chunk))).all()))
     new_applications = [
         {"job_id": job_id, "profile_id": pid, "user_id": owner_of.get(pid),
-         "batch_id": batch_id}
+         "batch_id": batch_id, "applied_on": applied_on.get((job_id, pid))}
         for job_id, pids in applied_by.items() for pid in pids
         if (job_id, pid) not in have
     ]

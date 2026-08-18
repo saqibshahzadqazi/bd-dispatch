@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, download, safeUrl } from "../api.js";
+import EntryTable from "./EntryTable.jsx";
 
 const FIELD_LABELS = {
   url: "Job link",
@@ -19,6 +20,7 @@ export default function BdHome() {
   const [note, setNote] = useState(null);
   const [busy, setBusy] = useState(false);
   const [hot, setHot] = useState(false);
+  const [how, setHow] = useState("upload");   // upload | type
   const fileInput = useRef(null);
 
   const batch = useMemo(
@@ -172,24 +174,51 @@ export default function BdHome() {
             <div className="muted">This cycle is closed. Uploads are only accepted while a cycle is open.</div>
           ) : (
             <>
-              <div
-                className={hot ? "drop hot" : "drop"}
-                onClick={() => fileInput.current?.click()}
-                onDragOver={(e) => { e.preventDefault(); setHot(true); }}
-                onDragLeave={() => setHot(false)}
-                onDrop={(e) => { e.preventDefault(); setHot(false); send(e.dataTransfer.files[0]); }}
-              >
-                <div style={{ fontFamily: "var(--display)", fontWeight: 500, fontSize: 15 }}>
-                  {busy ? "Reading the sheet…" : `Drop ${profile?.name}'s sheet here, or click to choose`}
-                </div>
-                <div className="muted" style={{ marginTop: 5 }}>
-                  .xlsx, .xls or .csv — re-uploading replaces what you sent for this profile.
-                </div>
-                <input ref={fileInput} type="file" accept=".xlsx,.xls,.csv,.tsv" hidden
-                       onChange={(e) => send(e.target.files[0])} />
+              <div className="row" style={{ gap: 8 }}>
+                <button className={how === "upload" ? "" : "ghost"} onClick={() => setHow("upload")}>
+                  Upload a sheet
+                </button>
+                <button className={how === "type" ? "" : "ghost"} onClick={() => setHow("type")}>
+                  Type them in
+                </button>
+                <span className="muted">
+                  {how === "upload"
+                    ? "Already keep a spreadsheet? Drop the whole thing in."
+                    : "No spreadsheet? Add jobs one row at a time as you apply."}
+                </span>
               </div>
 
-              {upload && headers.length > 0 && (
+              {how === "type" && (
+                <EntryTable
+                  batchId={batchId}
+                  profileId={profileId}
+                  profileName={profile?.name}
+                  onSaved={(result) => setUpload((current) => (
+                    current ? { ...current, row_count: result.row_count } : current
+                  ))}
+                />
+              )}
+
+              {how === "upload" && (
+                <div
+                  className={hot ? "drop hot" : "drop"}
+                  onClick={() => fileInput.current?.click()}
+                  onDragOver={(e) => { e.preventDefault(); setHot(true); }}
+                  onDragLeave={() => setHot(false)}
+                  onDrop={(e) => { e.preventDefault(); setHot(false); send(e.dataTransfer.files[0]); }}
+                >
+                  <div style={{ fontFamily: "var(--display)", fontWeight: 500, fontSize: 15 }}>
+                    {busy ? "Reading the sheet…" : `Drop ${profile?.name}'s sheet here, or click to choose`}
+                  </div>
+                  <div className="muted" style={{ marginTop: 5 }}>
+                    .xlsx, .xls or .csv — re-uploading replaces what you sent for this profile.
+                  </div>
+                  <input ref={fileInput} type="file" accept=".xlsx,.xls,.csv,.tsv" hidden
+                         onChange={(e) => send(e.target.files[0])} />
+                </div>
+              )}
+
+              {how === "upload" && upload && headers.length > 0 && (
                 <div className="card pad stack" style={{ gap: 12 }}>
                   <div>
                     <h3>Columns we found</h3>

@@ -101,8 +101,12 @@ def safe_url(value: object) -> str:
     return text
 
 
-def apply_mapping(rows: list[dict], mapping: dict[str, str]) -> list[dict]:
-    """Project raw sheet rows onto the canonical field names."""
+def project_rows(rows: list[dict], mapping: dict[str, str]) -> list[dict]:
+    """Every row in canonical form, blanks and all.
+
+    The hand-entry screen needs the half-filled rows too — a row someone is
+    still typing has to survive a save, or it disappears under their cursor.
+    """
     projected = []
     for row in rows:
         record = {}
@@ -110,6 +114,16 @@ def apply_mapping(rows: list[dict], mapping: dict[str, str]) -> list[dict]:
             source = mapping.get(field["key"]) or ""
             record[field["key"]] = str(row.get(source, "") or "").strip() if source else ""
         record["url"] = safe_url(record["url"])
-        if record["url"] or record["title"] or record["company"]:
-            projected.append(record)
+        projected.append(record)
     return projected
+
+
+def is_usable(record: dict) -> bool:
+    """Enough to identify a job by link, or by client and title."""
+    return bool(record["url"] or record["title"] or record["company"])
+
+
+def apply_mapping(rows: list[dict], mapping: dict[str, str]) -> list[dict]:
+    """Project raw sheet rows onto the canonical field names, dropping the
+    rows that carry nothing the matcher could use."""
+    return [record for record in project_rows(rows, mapping) if is_usable(record)]
