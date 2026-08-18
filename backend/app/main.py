@@ -502,7 +502,10 @@ def save_entries(batch_id: int, profile_id: int, body: EntriesIn,
         record = {"url": ingest.safe_url(entry.url), "title": entry.title.strip(),
                   "company": entry.company.strip(), "platform": entry.platform.strip(),
                   "date": entry.date.strip()}
-        if any(record.values()):                       # a wholly blank row is not a row
+        # Judge on the fields that identify a job. The timestamp is stamped for
+        # the user the moment they add a row, so every untouched row carries one
+        # — counting it would file a blank row as work.
+        if ingest.is_usable(record):
             kept.append({TYPED_HEADERS[key]: value for key, value in record.items()})
 
     upload = db.scalar(select(Upload).where(Upload.batch_id == batch_id,
@@ -884,7 +887,8 @@ def set_status(assignment_id: int, body: StatusIn, db: Session = Depends(get_db)
                                                      Application.profile_id == row.profile_id))
         if not exists:
             db.add(Application(job_id=row.job_id, profile_id=row.profile_id,
-                               user_id=row.user_id, batch_id=row.batch_id))
+                               user_id=row.user_id, batch_id=row.batch_id,
+                               applied_on=applied_stamp()))
     db.commit()
     return {"ok": True, "status": row.status}
 

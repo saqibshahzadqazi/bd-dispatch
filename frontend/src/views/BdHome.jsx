@@ -20,7 +20,8 @@ export default function BdHome() {
   const [note, setNote] = useState(null);
   const [busy, setBusy] = useState(false);
   const [hot, setHot] = useState(false);
-  const [how, setHow] = useState("upload");   // upload | type
+  const [tab, setTab] = useState("applied");   // applied | new
+  const [how, setHow] = useState("type");      // type | upload
   const fileInput = useRef(null);
 
   const batch = useMemo(
@@ -44,7 +45,12 @@ export default function BdHome() {
       .catch((err) => setNote({ bad: true, text: err.message }));
   }, []);
 
-  // Reload uploads and lists whenever the cycle or the chosen profile changes.
+  // Once a cycle is computed there is nothing left to hand in, so open on the
+  // half of the screen that still has something to do.
+  useEffect(() => {
+    if (batch) setTab(batch.status === "computed" ? "new" : "applied");
+  }, [batch?.id, batch?.status]);
+
   useEffect(() => {
     if (!batchId) return;
     setUpload(null);
@@ -106,6 +112,7 @@ export default function BdHome() {
 
   const headers = upload?.headers || [];
   const done = sheet.filter((j) => j.status === "applied").length;
+  const handedIn = upload?.row_count || 0;
 
   if (!profiles.length) {
     return (
@@ -125,7 +132,7 @@ export default function BdHome() {
         <div>
           <h1>Your work</h1>
           <p className="muted" style={{ marginTop: 3 }}>
-            Hand in what each profile applied to, then pick up the jobs it has not tried yet.
+            Working as <b>{profile?.name}</b>{profile?.headline ? ` · ${profile.headline}` : ""}.
           </p>
         </div>
         <label>
@@ -138,7 +145,7 @@ export default function BdHome() {
         </label>
       </div>
 
-      {profiles.length > 1 ? (
+      {profiles.length > 1 && (
         <div className="card pad">
           <h3>Which profile are you working as?</h3>
           <div className="row" style={{ marginTop: 10 }}>
@@ -158,170 +165,198 @@ export default function BdHome() {
             bearing on what your other profiles are offered.
           </p>
         </div>
-      ) : (
-        <p className="muted">
-          Working as <b>{profile?.name}</b>{profile?.headline ? ` · ${profile.headline}` : ""}.
-        </p>
       )}
 
       {note && <div className={note.bad ? "notice" : "notice ok"}>{note.text}</div>}
       {!batches.length && <div className="notice">No cycle is open yet. Your manager needs to start one.</div>}
 
       {batch && (
-        <section className="stack" style={{ gap: 10 }}>
-          <h2>1 · Hand in what {profile?.name} applied to</h2>
-          {batch.status !== "open" ? (
-            <div className="muted">This cycle is closed. Uploads are only accepted while a cycle is open.</div>
-          ) : (
-            <>
-              <div className="row" style={{ gap: 8 }}>
-                <button className={how === "upload" ? "" : "ghost"} onClick={() => setHow("upload")}>
-                  Upload a sheet
-                </button>
-                <button className={how === "type" ? "" : "ghost"} onClick={() => setHow("type")}>
-                  Type them in
-                </button>
-                <span className="muted">
-                  {how === "upload"
-                    ? "Already keep a spreadsheet? Drop the whole thing in."
-                    : "No spreadsheet? Add jobs one row at a time as you apply."}
-                </span>
-              </div>
-
-              {how === "type" && (
-                <EntryTable
-                  batchId={batchId}
-                  profileId={profileId}
-                  profileName={profile?.name}
-                  onSaved={(result) => setUpload((current) => (
-                    current ? { ...current, row_count: result.row_count } : current
-                  ))}
-                />
-              )}
-
-              {how === "upload" && (
-                <div
-                  className={hot ? "drop hot" : "drop"}
-                  onClick={() => fileInput.current?.click()}
-                  onDragOver={(e) => { e.preventDefault(); setHot(true); }}
-                  onDragLeave={() => setHot(false)}
-                  onDrop={(e) => { e.preventDefault(); setHot(false); send(e.dataTransfer.files[0]); }}
-                >
-                  <div style={{ fontFamily: "var(--display)", fontWeight: 500, fontSize: 15 }}>
-                    {busy ? "Reading the sheet…" : `Drop ${profile?.name}'s sheet here, or click to choose`}
-                  </div>
-                  <div className="muted" style={{ marginTop: 5 }}>
-                    .xlsx, .xls or .csv — re-uploading replaces what you sent for this profile.
-                  </div>
-                  <input ref={fileInput} type="file" accept=".xlsx,.xls,.csv,.tsv" hidden
-                         onChange={(e) => send(e.target.files[0])} />
-                </div>
-              )}
-
-              {how === "upload" && upload && headers.length > 0 && (
-                <div className="card pad stack" style={{ gap: 12 }}>
-                  <div>
-                    <h3>Columns we found</h3>
-                    <p className="muted" style={{ marginTop: 3 }}>
-                      The job link matters most — it is how the same posting is recognised across
-                      everyone's sheets. If the sheet has no links, make sure the title and client
-                      are both set.
-                    </p>
-                  </div>
-                  <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))" }}>
-                    {Object.keys(FIELD_LABELS).map((key) => (
-                      <div key={key}>
-                        <label htmlFor={`map-${key}`}>{FIELD_LABELS[key]}</label>
-                        <select id={`map-${key}`} value={upload.mapping?.[key] || ""}
-                                style={{ width: "100%", marginTop: 4,
-                                         borderColor: key === "url" && !upload.mapping?.url ? "var(--brick)" : undefined }}
-                                onChange={(e) => remap(key, e.target.value)}>
-                          <option value="">— not in my sheet —</option>
-                          {headers.map((h) => <option key={h} value={h}>{h}</option>)}
-                        </select>
-                      </div>
-                    ))}
-                  </div>
-                  {!upload.mapping?.url && (
-                    <div className="notice">
-                      No job link column is set. Matching will fall back to client plus title,
-                      which is less exact.
-                    </div>
-                  )}
-                  <div className="row">
-                    <span className="pill on">{upload.row_count} rows handed in</span>
-                    <button className="link" onClick={async () => {
-                      await api.deleteUpload(upload.id);
-                      setUpload(null);
-                      setNote({ text: "That sheet was removed. Upload a different one when ready." });
-                    }}>Remove this sheet</button>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </section>
-      )}
-
-      {batch && (
-        <section className="stack" style={{ gap: 10 }}>
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <div>
-              <h2>2 · New jobs for {profile?.name}</h2>
-              <p className="muted" style={{ marginTop: 3 }}>
-                {sheet.length
-                  ? `${sheet.length} jobs ${profile?.name} has never applied to, ${done} marked applied.`
-                  : "Nothing yet — your manager builds the lists once everyone has handed in."}
-              </p>
-            </div>
-            {sheet.length > 0 && (
-              <button className="go" onClick={() =>
-                download(`/batches/${batchId}/profiles/${profileId}/sheet.xlsx`, "new-jobs.xlsx")
-                  .catch((err) => setNote({ bad: true, text: err.message }))}>
-                Download as Excel
-              </button>
-            )}
+        <>
+          {/* The two things a BD ever does here: report what they worked, and
+              pick up what is next. */}
+          <div className="row" style={{ gap: 8 }}>
+            <button className={tab === "applied" ? "" : "ghost"} onClick={() => setTab("applied")}>
+              Jobs I applied to{handedIn ? ` (${handedIn})` : ""}
+            </button>
+            <button className={tab === "new" ? "" : "ghost"} onClick={() => setTab("new")}>
+              New jobs for {profile?.name}{sheet.length ? ` (${sheet.length})` : ""}
+            </button>
           </div>
 
-          {sheet.length > 0 && (
-            <div className="card scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Job</th><th>Client</th><th>Platform</th><th>Link</th><th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sheet.map((job) => (
-                    <tr key={job.id} style={{ opacity: job.status === "skipped" ? 0.5 : 1 }}>
-                      <td className="truncate">{job.title || "—"}</td>
-                      <td>{job.company || "—"}</td>
-                      <td className="muted">{job.platform || "—"}</td>
-                      <td className="truncate">
-                        {safeUrl(job.url)
-                          ? <a href={safeUrl(job.url)} target="_blank" rel="noreferrer noopener">open</a>
-                          : <span className="muted">no link</span>}
-                      </td>
-                      <td>
-                        <select value={job.status} onChange={(e) => mark(job.id, e.target.value)}>
-                          <option value="pending">to do</option>
-                          <option value="applied">applied</option>
-                          <option value="skipped">skipped</option>
-                        </select>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+          {tab === "applied" && (
+            <section className="stack" style={{ gap: 10 }}>
+              <div>
+                <h2>Jobs {profile?.name} applied to</h2>
+                <p className="muted" style={{ marginTop: 3 }}>
+                  Hand these in so nobody is sent something this profile has already used.
+                </p>
+              </div>
+
+              {batch.status !== "open" ? (
+                <div className="notice">
+                  This cycle is closed — your manager has already built the lists. Anything
+                  new goes into the next one.
+                </div>
+              ) : (
+                <>
+                  <div className="row" style={{ gap: 8 }}>
+                    <button className={how === "type" ? "" : "ghost"} onClick={() => setHow("type")}>
+                      Add manually
+                    </button>
+                    <button className={how === "upload" ? "" : "ghost"} onClick={() => setHow("upload")}>
+                      Upload a sheet
+                    </button>
+                    <span className="muted">
+                      {how === "type"
+                        ? "Add jobs one row at a time as you apply."
+                        : "Already keep a spreadsheet? Drop the whole thing in."}
+                    </span>
+                  </div>
+
+                  {how === "type" && (
+                    <EntryTable
+                      batchId={batchId}
+                      profileId={profileId}
+                      profileName={profile?.name}
+                      onSaved={(result) => setUpload((current) => (
+                        current
+                          ? { ...current, row_count: result.row_count }
+                          : { row_count: result.row_count, mapping: {}, headers: [] }
+                      ))}
+                    />
+                  )}
+
+                  {how === "upload" && (
+                    <div
+                      className={hot ? "drop hot" : "drop"}
+                      onClick={() => fileInput.current?.click()}
+                      onDragOver={(e) => { e.preventDefault(); setHot(true); }}
+                      onDragLeave={() => setHot(false)}
+                      onDrop={(e) => { e.preventDefault(); setHot(false); send(e.dataTransfer.files[0]); }}
+                    >
+                      <div style={{ fontFamily: "var(--display)", fontWeight: 500, fontSize: 15 }}>
+                        {busy ? "Reading the sheet…" : `Drop ${profile?.name}'s sheet here, or click to choose`}
+                      </div>
+                      <div className="muted" style={{ marginTop: 5 }}>
+                        .xlsx, .xls or .csv — re-uploading replaces what you sent for this profile.
+                      </div>
+                      <input ref={fileInput} type="file" accept=".xlsx,.xls,.csv,.tsv" hidden
+                             onChange={(e) => send(e.target.files[0])} />
+                    </div>
+                  )}
+
+                  {how === "upload" && upload && headers.length > 0 && (
+                    <div className="card pad stack" style={{ gap: 12 }}>
+                      <div>
+                        <h3>Columns we found</h3>
+                        <p className="muted" style={{ marginTop: 3 }}>
+                          The job link matters most — it is how the same posting is recognised
+                          across everyone's sheets. If the sheet has no links, make sure the
+                          title and client are both set.
+                        </p>
+                      </div>
+                      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))" }}>
+                        {Object.keys(FIELD_LABELS).map((key) => (
+                          <div key={key}>
+                            <label htmlFor={`map-${key}`}>{FIELD_LABELS[key]}</label>
+                            <select id={`map-${key}`} value={upload.mapping?.[key] || ""}
+                                    style={{ width: "100%", marginTop: 4,
+                                             borderColor: key === "url" && !upload.mapping?.url ? "var(--brick)" : undefined }}
+                                    onChange={(e) => remap(key, e.target.value)}>
+                              <option value="">— not in my sheet —</option>
+                              {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                      {!upload.mapping?.url && (
+                        <div className="notice">
+                          No job link column is set. Matching will fall back to client plus title,
+                          which is less exact.
+                        </div>
+                      )}
+                      <div className="row">
+                        <span className="pill on">{upload.row_count} rows handed in</span>
+                        <button className="link" onClick={async () => {
+                          await api.deleteUpload(upload.id);
+                          setUpload(null);
+                          setNote({ text: "That sheet was removed. Upload a different one when ready." });
+                        }}>Remove this sheet</button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
           )}
-          {sheet.length > 0 && (
-            <p className="muted">
-              Anything left as <b>to do</b> comes back next cycle. Marking a job
-              <b> applied</b> or <b> skipped</b> retires it from this profile for good.
-            </p>
+
+          {tab === "new" && (
+            <section className="stack" style={{ gap: 10 }}>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <div>
+                  <h2>New jobs for {profile?.name}</h2>
+                  <p className="muted" style={{ marginTop: 3 }}>
+                    {sheet.length
+                      ? `${sheet.length} jobs ${profile?.name} has never applied to, ${done} marked applied.`
+                      : "Nothing yet — your manager builds the lists once everyone has handed in."}
+                  </p>
+                </div>
+                {sheet.length > 0 && (
+                  <button className="go" onClick={() =>
+                    download(`/batches/${batchId}/profiles/${profileId}/sheet.xlsx`, "new-jobs.xlsx")
+                      .catch((err) => setNote({ bad: true, text: err.message }))}>
+                    Download as Excel
+                  </button>
+                )}
+              </div>
+
+              {sheet.length === 0 ? (
+                <div className="notice">
+                  {batch.status === "open"
+                    ? "This cycle is still open. Once everyone has handed in and your manager builds the lists, your new jobs appear here."
+                    : "Nothing was dispatched to this profile in this cycle."}
+                </div>
+              ) : (
+                <>
+                  <div className="card scroll">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Job</th><th>Client</th><th>Platform</th><th>Link</th><th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sheet.map((job) => (
+                          <tr key={job.id} style={{ opacity: job.status === "skipped" ? 0.5 : 1 }}>
+                            <td className="truncate">{job.title || "—"}</td>
+                            <td>{job.company || "—"}</td>
+                            <td className="muted">{job.platform || "—"}</td>
+                            <td className="truncate">
+                              {safeUrl(job.url)
+                                ? <a href={safeUrl(job.url)} target="_blank" rel="noreferrer noopener">open</a>
+                                : <span className="muted">no link</span>}
+                            </td>
+                            <td>
+                              <select value={job.status} onChange={(e) => mark(job.id, e.target.value)}>
+                                <option value="pending">to do</option>
+                                <option value="applied">applied</option>
+                                <option value="skipped">skipped</option>
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="muted">
+                    Anything left as <b>to do</b> comes back next cycle. Marking a job
+                    <b> applied</b> or <b> skipped</b> retires it from this profile for good.
+                  </p>
+                </>
+              )}
+            </section>
           )}
-        </section>
+        </>
       )}
     </div>
   );

@@ -16,3 +16,6 @@ pandas>=2.2.3,<4.0
 openpyxl>=3.1.5,<4.0
 rapidfuzz>=3.11.0,<4.0
 psycopg2-binary>=2.9.10,<3.0
+# Windows ships no timezone database, so zoneinfo cannot resolve
+# America/New_York without this. Harmless on Linux, which already has one.
+tzdata>=2024.1

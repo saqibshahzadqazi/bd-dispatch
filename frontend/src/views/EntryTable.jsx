@@ -6,11 +6,30 @@ const COLUMNS = [
   { key: "title", label: "Job title", width: "26%", hint: "" },
   { key: "company", label: "Client", width: "18%", hint: "" },
   { key: "platform", label: "Platform", width: "12%", hint: "" },
-  { key: "date", label: "Applied on", width: "10%", hint: "" },
+  { key: "date", label: "Applied on", width: "14%", hint: "" },
 ];
 
-const BLANK = { url: "", title: "", company: "", platform: "", date: "" };
-const isEmpty = (row) => COLUMNS.every((c) => !String(row[c.key] || "").trim());
+// The team works to Eastern time. Match app/models.py if that ever changes.
+const WORKING_TIMEZONE = "America/New_York";
+
+/** Right now, where the team actually works — "2026-08-17 14:32". */
+export function stampNow() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: WORKING_TIMEZONE,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date());
+  const at = (type) => parts.find((p) => p.type === type)?.value || "";
+  return `${at("year")}-${at("month")}-${at("day")} ${at("hour")}:${at("minute")}`;
+}
+
+// What makes a row a job: a link, or a title, or a client. The timestamp does
+// not count — it is stamped for you, so every untouched row carries one and
+// counting it would file blank rows as work. The platform alone identifies
+// nothing either. Matches ingest.is_usable on the server.
+const IDENTIFYING = ["url", "title", "company"];
+const blankRow = () => ({ url: "", title: "", company: "", platform: "", date: stampNow() });
+const isEmpty = (row) => IDENTIFYING.every((key) => !String(row[key] || "").trim());
 
 /** Rows typed in by hand, saved as this profile's sheet for the cycle. */
 export default function EntryTable({ batchId, profileId, profileName, onSaved }) {
@@ -26,7 +45,7 @@ export default function EntryTable({ batchId, profileId, profileName, onSaved })
     api.listEntries(batchId, profileId)
       .then((data) => {
         if (!live) return;
-        setRows(data.rows.length ? data.rows : [{ ...BLANK }]);
+        setRows(data.rows.length ? data.rows : [blankRow()]);
         lastSaved.current = JSON.stringify(data.rows);
         setState("idle");
       })
@@ -61,7 +80,7 @@ export default function EntryTable({ batchId, profileId, profileName, onSaved })
   const addRow = () => {
     setRows((current) => {
       lastCell.current = current.length;
-      return [...current, { ...BLANK }];
+      return [...current, blankRow()];
     });
     setState("idle");
   };
@@ -69,7 +88,7 @@ export default function EntryTable({ batchId, profileId, profileName, onSaved })
   const removeRow = (index) => {
     setRows((current) => {
       const next = current.filter((_, i) => i !== index);
-      const safe = next.length ? next : [{ ...BLANK }];
+      const safe = next.length ? next : [blankRow()];
       save(safe);
       return safe;
     });
@@ -95,12 +114,14 @@ export default function EntryTable({ batchId, profileId, profileName, onSaved })
       const next = [...current];
       grid.forEach((cells, r) => {
         const target = index + r;
-        if (!next[target]) next[target] = { ...BLANK };
+        if (!next[target]) next[target] = blankRow();
         else next[target] = { ...next[target] };
         cells.forEach((value, c) => {
           const column = COLUMNS[startColumn + c];
           if (column) next[target][column.key] = value.trim();
         });
+        // A pasted block usually carries no date, or an empty trailing cell.
+        if (!next[target].date) next[target].date = stampNow();
       });
       save(next);
       return next;
@@ -133,7 +154,11 @@ export default function EntryTable({ batchId, profileId, profileName, onSaved })
                       id={`cell-${index}-${c.key}`}
                       value={row[c.key] || ""}
                       placeholder={c.hint}
-                      style={{ width: "100%", border: "1px solid transparent", background: "none" }}
+                      title={c.key === "date" ? "Stamped automatically. Edit if you are backfilling." : undefined}
+                      style={{ width: "100%", border: "1px solid transparent", background: "none",
+                               fontFamily: c.key === "date" ? "var(--mono)" : undefined,
+                               fontSize: c.key === "date" ? 12 : undefined,
+                               color: c.key === "date" ? "var(--slate)" : undefined }}
                       onChange={(e) => edit(index, c.key, e.target.value)}
                       onPaste={(e) => onPaste(index, c.key, e)}
                       onBlur={() => save(rows)}
@@ -178,6 +203,10 @@ export default function EntryTable({ batchId, profileId, profileName, onSaved })
       <p className="muted">
         Press <b>Enter</b> on the last row to add another. You can also copy a block of cells
         straight out of Excel and paste it into the first cell — it will fill across and down.
+        <br />
+        <b>Applied on</b> is stamped for you in Eastern time the moment you add a row, so there
+        is nothing to fill in. Overwrite it if you are catching up on something you applied to
+        earlier.
       </p>
     </div>
   );

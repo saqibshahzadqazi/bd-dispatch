@@ -317,6 +317,15 @@ def test_opening_the_entry_screen_does_not_hand_anything_in(client, admin, new_p
     assert blank.status_code == 200 and blank.json()["row_count"] == 0
     assert client.get(f"/api/batches/{batch_id}", headers=admin).json()["uploads"] == []
 
+    # Every new row arrives pre-stamped with the time, so a row carrying only a
+    # timestamp is still an empty row.
+    stamped = client.put(f"/api/batches/{batch_id}/profiles/{typed}/entries", headers=ali,
+                         json={"rows": [{"url": "", "title": "", "company": "",
+                                         "platform": "Upwork", "date": "2026-08-18 11:45"}]})
+    assert stamped.status_code == 200 and stamped.json()["row_count"] == 0, \
+        "a row with only a stamp and a platform is not a job"
+    assert client.get(f"/api/batches/{batch_id}", headers=admin).json()["uploads"] == []
+
     # And clearing a real sheet takes it back out again.
     client.put(f"/api/batches/{batch_id}/profiles/{typed}/entries",
                json={"rows": [{"url": "https://www.upwork.com/jobs/~01000000000000beef"}]},
@@ -324,6 +333,41 @@ def test_opening_the_entry_screen_does_not_hand_anything_in(client, admin, new_p
     assert len(client.get(f"/api/batches/{batch_id}", headers=admin).json()["uploads"]) == 1
     client.put(f"/api/batches/{batch_id}/profiles/{typed}/entries", json={"rows": []}, headers=ali)
     assert client.get(f"/api/batches/{batch_id}", headers=admin).json()["uploads"] == []
+
+
+def test_the_applied_date_is_kept(client, admin, new_profile):
+    """The date column used to be read off the sheet and thrown away. It should
+    reach the history row, and marking a job applied should stamp it."""
+    from sqlalchemy import select as sa_select
+
+    from app.main import SessionLocal
+    from app.models import Application
+
+    one = new_profile("ali@example.com")
+    two = new_profile("sara@example.com")
+    ali = token(client, "ali@example.com")
+
+    batch_id = open_cycle(client, admin, "Dates")
+    client.put(f"/api/batches/{batch_id}/profiles/{one}/entries", headers=ali, json={"rows": [
+        {"url": "https://www.upwork.com/jobs/~01000000000000d1d1", "title": "Dated",
+         "company": "Acme", "platform": "Upwork", "date": "2026-08-17 09:15"}]})
+    hand_in(client, batch_id, token(client, "sara@example.com"), two, sheet(range(9400, 9405)))
+    client.post(f"/api/batches/{batch_id}/compute", headers=admin)
+
+    db = SessionLocal()
+    try:
+        typed = db.scalar(sa_select(Application).where(Application.profile_id == one))
+        assert typed.applied_on == "2026-08-17 09:15", "the typed date should be stored verbatim"
+
+        # Marking something applied stamps the moment it happened.
+        job = client.get(f"/api/batches/{batch_id}/profiles/{one}/sheet", headers=ali).json()["jobs"][0]
+        client.patch(f"/api/assignments/{job['id']}", json={"status": "applied"}, headers=ali)
+        db.expire_all()
+        marked = db.scalars(sa_select(Application).where(Application.profile_id == one)).all()
+        stamps = [a.applied_on for a in marked if a.applied_on]
+        assert len(stamps) == 2 and any(s != "2026-08-17 09:15" for s in stamps)
+    finally:
+        db.close()
 
 
 def test_typed_entries_reject_a_dangerous_link(client, admin, new_profile):
