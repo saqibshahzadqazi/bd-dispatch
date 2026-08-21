@@ -112,8 +112,8 @@ and every route out of it is one button away.
 
 ### Yours
 
-Everyone gets their own, whatever else is switched on. It opens on the one
-number worth acting on — jobs still sitting unworked on your list — with the
+Once your manager has opened it for you. It leads on the one number worth acting
+on — jobs still sitting unworked on your list — with the
 button that takes you to them.
 
 Under it: what you logged this cycle, how much of it a colleague had already
@@ -132,7 +132,8 @@ act on:
   two profiles have reported in, so this is usually the thing holding it up.
 - **Each person, rolled up.** One person may run several profiles, so this is
   the only view that answers "how is Ali doing" rather than "how is Khuram
-  doing". Open a row to see their profiles separately.
+  doing". **Open** on a row shows you their dashboard as they would see it, with
+  the switch that decides whether they can.
 - **Every profile**, ranked, clickable. Clicking one opens it: its figures, a
   month of activity, how it has done cycle by cycle, and the last twenty jobs
   it logged.
@@ -143,23 +144,42 @@ act on:
 
 ### Who may see whose numbers
 
+Two switches, and they answer different questions. The manager sees everything
+whatever they are set to.
+
+**1. May this person see their own figures?**
+
+Nobody gets a dashboard until the manager opens it, one person at a time. A new
+account starts closed. Being measured on a screen should be a decision somebody
+made, not a side effect of having a login.
+
+The manager opens **Dashboard → Their dashboard**, hits **Open** on somebody's
+row, and is looking at that person's dashboard — the real one, the same
+component fed the same payload, so what you check before opening it is exactly
+what they will get. The switch to hand it over sits on top of it. It is also in
+the **Dashboard** column of **People and profiles** for when you already know.
+
+Closing it takes nothing away from the work. Their list, the sheet they hand in,
+everything under **My work** is untouched — only the screen of figures goes, and
+the tab with it.
+
+**2. May they see each other?**
+
 The **team board** — every profile side by side, ranked — is the manager's by
-default and nobody else's. A switch on the manager's dashboard opens it to the
-team.
+default. One workspace-wide switch opens it to everybody who already has a
+dashboard of their own; it never reaches somebody whose own is still closed.
 
-It starts closed on purpose. A board that appears without anyone deciding to
-show it is a performance ranking nobody agreed to. Open it when people should
-see the duplication they are creating between them; leave it shut when they
-should not. Either way everyone always sees their own numbers, and nobody ever
-sees another profile's *jobs* — the board carries totals, and the drill-down
-into one profile's record refuses anyone but its owner and the manager.
+Open it when the team should see the duplication they are creating between
+them; leave it shut when a ranking is not what they need. One profile can be
+taken off it without hiding everyone, from **People and profiles** or the
+switch under the board. It stays on the manager's screen.
 
-One profile can be taken off the shared board without hiding everybody, from
-the row in **People and profiles** or the switch under the board itself. It
-stays on the manager's screen.
+Nobody ever sees another profile's *jobs*. The board carries totals; the
+drill-down into one profile's record refuses anyone but its owner and the
+manager.
 
-The check is on the server. Closing the board is not a hidden tab; it is a
-`403`.
+Both checks are on the server. A closed dashboard is not a hidden tab — it is a
+`403`, and the tab is hidden only so nobody walks into one.
 
 ---
 
@@ -267,7 +287,8 @@ colleague's machine.
 
 1. Sign in as manager → **People and profiles**. Add your team, then add a
    profile for each identity you apply under and say who runs it. Delete the
-   samples.
+   samples. Decide there, or later from the dashboard, who gets to see their own
+   figures — a new person starts without.
 2. **Batches** → open a cycle. Pick the mode, the cap, and how often the lists
    should rebuild. Then leave it alone.
 3. Each person signs in and picks the profile they are working as. Two tabs:
@@ -391,8 +412,9 @@ frontend/
     api.js        Fetch wrapper, token handling, downloads
     views/
       Login.jsx            Sign in
-      Dashboard.jsx        A BD's own progress, and the team board if it is open
-      ManagerDashboard.jsx The workspace, each person, and the visibility switch
+      PersonDashboard.jsx  One person's progress — the screen itself
+      Dashboard.jsx        Fetches it for the person whose it is
+      ManagerDashboard.jsx The workspace, each person, and the two switches
       BdHome.jsx           Logging jobs and working the list
       AdminHome.jsx        Running cycles
       People.jsx           People, profiles, and who is on the board
@@ -401,6 +423,12 @@ frontend/
 
 `dashboard.py` never writes. A dashboard can be opened while the timer is
 halfway through rebuilding a cycle without disturbing it.
+
+`PersonDashboard.jsx` is rendered by both the person it belongs to and the
+manager looking at them — same component, same payload, one `viewingAs` prop
+that changes "your list" to "Ali's list" and removes the buttons that would put
+a manager inside somebody else's work. There is no second, approximate copy of
+that screen to drift out of step with the real one.
 
 All the dispatch logic lives in `matching.py` with no database or framework
 imports, so you can change a rule and see the effect from the unit tests in
