@@ -75,6 +75,11 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     role = Column(String(16), nullable=False, default="bd")  # admin | bd
     is_active = Column(Boolean, nullable=False, default=True)
+    # Whether this person may open their own dashboard — their figures, their
+    # progress, their streak. Off until a manager turns it on, so nobody is
+    # measured on a screen before somebody decided to measure them. A manager
+    # can always see it, for anyone, either way.
+    dashboard_visible = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=utcnow)
 
 
@@ -93,7 +98,26 @@ class Profile(Base):
     platform = Column(String(120), nullable=False, default="")
     user_id = Column(Integer, ForeignKey("users.id"), index=True)  # who runs it
     is_active = Column(Boolean, nullable=False, default=True)
+    # Whether this profile's progress appears on the shared team board. The
+    # board as a whole is gated by a workspace switch the manager holds; this
+    # takes one profile off it without hiding everybody.
+    share_progress = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=utcnow)
+
+
+class Setting(Base):
+    """Workspace switches the manager holds.
+
+    One row per key with a JSON value, so a new switch is a new row rather than
+    a migration. The only one so far decides whether the team board — every
+    profile's progress side by side — is something a BD may open, or something
+    only the manager sees. It starts closed: a board that appears without
+    anyone deciding to show it is a performance ranking nobody agreed to.
+    """
+    __tablename__ = "settings"
+    key = Column(String(64), primary_key=True)
+    value = Column(JSON, default=dict)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class Batch(Base):

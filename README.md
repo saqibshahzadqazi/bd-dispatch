@@ -105,6 +105,64 @@ A job leaves a profile's rotation for good only when that profile marks it
 
 ---
 
+## The dashboards
+
+Both roles land on a dashboard. It is the screen that says what is waiting,
+and every route out of it is one button away.
+
+### Yours
+
+Everyone gets their own, whatever else is switched on. It opens on the one
+number worth acting on — jobs still sitting unworked on your list — with the
+button that takes you to them.
+
+Under it: what you logged this cycle, how much of it a colleague had already
+found, how much of your list you have worked through, a fortnight of daily
+activity, and a card per profile you run. The duplicate count is the one to
+read twice. If ten of the thirty jobs you logged were already on somebody
+else's sheet, your search and theirs are covering the same ground, and that is
+fixable at the source in a way no amount of dispatching can match.
+
+### The manager's
+
+The same picture for the whole workspace, plus the things only a manager can
+act on:
+
+- **Who has not handed in.** Named, not counted. A cycle cannot be built until
+  two profiles have reported in, so this is usually the thing holding it up.
+- **Each person, rolled up.** One person may run several profiles, so this is
+  the only view that answers "how is Ali doing" rather than "how is Khuram
+  doing". Open a row to see their profiles separately.
+- **Every profile**, ranked, clickable. Clicking one opens it: its figures, a
+  month of activity, how it has done cycle by cycle, and the last twenty jobs
+  it logged.
+- **Duplicated effort over time.** The share of the team's typing that two
+  profiles spent on the same posting, cycle by cycle. It is the number this
+  whole tool exists to bring down, and the only place you can see whether it
+  is going down.
+
+### Who may see whose numbers
+
+The **team board** — every profile side by side, ranked — is the manager's by
+default and nobody else's. A switch on the manager's dashboard opens it to the
+team.
+
+It starts closed on purpose. A board that appears without anyone deciding to
+show it is a performance ranking nobody agreed to. Open it when people should
+see the duplication they are creating between them; leave it shut when they
+should not. Either way everyone always sees their own numbers, and nobody ever
+sees another profile's *jobs* — the board carries totals, and the drill-down
+into one profile's record refuses anyone but its owner and the manager.
+
+One profile can be taken off the shared board without hiding everybody, from
+the row in **People and profiles** or the switch under the board itself. It
+stays on the manager's screen.
+
+The check is on the server. Closing the board is not a hidden tab; it is a
+`403`.
+
+---
+
 ## Run it locally
 
 You need Python 3.10+ and Node 18+. Nothing else.
@@ -178,6 +236,8 @@ exercise the auto-mapper and the fuzzy tier.
 cd backend
 pytest test_matching.py -v      # 26 rules: fingerprints, fuzzy merge, both modes
 pytest test_e2e.py -v -s        # full round trip, prints the report
+pytest test_dashboard.py -v     # the figures, and who may see whose
+pytest                          # all of it
 ```
 
 Expected output on the sample data:
@@ -218,7 +278,9 @@ colleague's machine.
    - **New jobs** — what this profile has never applied to, refreshed as the
      lists rebuild.
 4. Nobody needs to press anything. The lists rebuild on the timer as sheets
-   arrive; **Build now** is there if you want it immediately.
+   arrive; **Build now** is there if you want it immediately. **Dashboard**
+   shows you who has handed in, who is working their list and who is not,
+   without opening anything.
 5. Work the list in the browser or download it as Excel. Marking jobs
    **applied** or **skipped** as you go is what keeps the next cycle accurate,
    and those marks survive every rebuild.
@@ -316,18 +378,29 @@ backend/
     main.py       FastAPI app, auth, all routes
     models.py     Tables, and the constraints that carry the guarantees
     matching.py   Fingerprints, fuzzy merge, cover and split — pure functions
+    dashboard.py  Progress figures — read-only queries, no writes anywhere
     ingest.py     Spreadsheet reading and column auto-detection
     exports.py    Excel output
     schema.py     The v1 -> v2 upgrade
   seed.py         First accounts and profiles, and the sample data generator
-  test_matching.py, test_e2e.py
+  test_matching.py, test_e2e.py, test_dashboard.py
 
 frontend/
   src/
     App.jsx       Shell and role routing
     api.js        Fetch wrapper, token handling, downloads
-    views/        Login, BdHome, AdminHome, People
+    views/
+      Login.jsx            Sign in
+      Dashboard.jsx        A BD's own progress, and the team board if it is open
+      ManagerDashboard.jsx The workspace, each person, and the visibility switch
+      BdHome.jsx           Logging jobs and working the list
+      AdminHome.jsx        Running cycles
+      People.jsx           People, profiles, and who is on the board
+      widgets.jsx          Tiles, sparklines, progress bars, the team board
 ```
+
+`dashboard.py` never writes. A dashboard can be opened while the timer is
+halfway through rebuilding a cycle without disturbing it.
 
 All the dispatch logic lives in `matching.py` with no database or framework
 imports, so you can change a rule and see the effect from the unit tests in

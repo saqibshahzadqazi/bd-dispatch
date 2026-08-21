@@ -109,7 +109,50 @@ tbody tr:hover { background: #faf9f6; }
 .notice.ok { border-left-color: var(--pine); background: #eef6f1; color: #1d4a36; }
 .truncate { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Dashboards --------------------------------------------------------------- */
+.stat .foot { display: block; font-size: 10.5px; color: var(--slate); opacity: 0.8; }
+
+/* The one number worth acting on, sized so it is read before anything else. */
+.headline { align-items: center; }
+.headline > div:first-child { display: flex; gap: 16px; align-items: center; }
+.headline-figure { font-size: 46px; font-weight: 500; line-height: 1; }
+
+/* Applied / skipped / still to do, as one bar. */
+.bar { display: flex; height: 8px; background: var(--rule); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--rule); }
+
+/* Jobs logged per day. Fixed height, stretched to whatever width it is given —
+   the bars carry the shape, the axis underneath carries the scale. */
+.spark-wrap { display: block; }
+.spark { display: block; width: 100%; height: 46px; }
+.spark-axis { display: flex; justify-content: space-between; margin-top: 5px; font-size: 11px; }
+
+/* The four figures behind one profile. */
+.figures { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.figures b { display: block; font-size: 19px; font-weight: 500; line-height: 1.2; }
+.figures span { font-size: 10.5px; color: var(--slate); }
+
+.board td { vertical-align: middle; }
+.board .num, td.num, th.num { text-align: right; }
+.board tr.is-mine { background: #eef4f8; }
+.board tr.is-mine:hover { background: #e6eef5; }
+
+.detail { border-left: 3px solid var(--petrol); }
+
+/* A callout that is telling you how something works, not warning you. */
+.notice.gate { border-left-color: var(--petrol); background: #eef4f8; color: var(--ink); }
+
+/* Duplicate rate, cycle by cycle. */
+.history { display: flex; gap: 10px; align-items: flex-end; min-height: 130px; }
+.history-col { display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 62px; }
+.history-value { font-size: 12px; }
+.history-bar { display: flex; align-items: flex-end; height: 80px; width: 26px; background: var(--paper); }
+.history-bar i { display: block; width: 100%; }
+.history-label { max-width: 74px; font-size: 11px; text-align: center; }
+
 @media (max-width: 640px) {
   .wrap { padding: 16px 12px 48px; }
   .truncate { max-width: 200px; }
+  .headline-figure { font-size: 34px; }
+  .figures { grid-template-columns: repeat(2, 1fr); }
 }

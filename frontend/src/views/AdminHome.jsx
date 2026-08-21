@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, download, safeUrl } from "../api.js";
+import { sinceText } from "./widgets.jsx";
 
 function Matrix({ names, rows }) {
   const offDiagonal = rows.flatMap((row, i) => row.filter((_, j) => i !== j));
@@ -35,18 +36,6 @@ function Matrix({ names, rows }) {
       </table>
     </div>
   );
-}
-
-/** "just now", "4 minutes ago", "2 hours ago" — enough to trust the numbers. */
-function sinceText(iso) {
-  const then = new Date(iso.endsWith("Z") || iso.includes("+") ? iso : `${iso}Z`);
-  const seconds = Math.max(0, Math.round((Date.now() - then.getTime()) / 1000));
-  if (seconds < 60) return "just now";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-  return then.toLocaleString();
 }
 
 export default function AdminHome() {
@@ -123,7 +112,7 @@ export default function AdminHome() {
       setDetail(detailData);
       const full = await api.report(current).catch(() => data);
       setReport(full);
-      setNote({ text: `Lists built. ${data.report["Jobs dispatched"]} jobs went out across ${data.participants.length} people.` });
+      setNote({ text: `Lists built. ${data.report["Jobs put on a list"]} jobs went out across ${data.participants.length} profiles.` });
     } catch (err) {
       setNote({ bad: true, text: err.message });
     } finally {

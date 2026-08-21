@@ -76,12 +76,15 @@ export async function download(path, fallbackName) {
   URL.revokeObjectURL(url);
 }
 
+const query = (batchId) => (batchId ? `?batch_id=${batchId}` : "");
+
 export const api = {
   login: (email, password) => request("/auth/login", { method: "POST", body: { email, password } }),
   me: () => request("/auth/me"),
 
   listUsers: () => request("/users"),
   createUser: (payload) => request("/users", { method: "POST", body: payload }),
+  updateUser: (id, payload) => request(`/users/${id}`, { method: "PATCH", body: payload }),
   deactivateUser: (id) => request(`/users/${id}`, { method: "DELETE" }),
 
   listProfiles: () => request("/profiles"),
@@ -111,6 +114,20 @@ export const api = {
     request(`/batches/${batchId}/profiles/${profileId}/entries`),
   saveEntries: (batchId, profileId, rows) =>
     request(`/batches/${batchId}/profiles/${profileId}/entries`, { method: "PUT", body: { rows } }),
+
+  settings: () => request("/settings"),
+  saveSettings: (payload) => request("/settings", { method: "PATCH", body: payload }),
+
+  // A cycle is optional everywhere below: leave it off and the server opens on
+  // the newest cycle still running.
+  dashboard: (batchId) => request(`/dashboard/me${query(batchId)}`),
+  teamBoard: (batchId) => request(`/dashboard/team${query(batchId)}`),
+  overview: (batchId) => request(`/dashboard/overview${query(batchId)}`),
+  // One person's dashboard as they would see it. Manager only.
+  personDashboard: (userId, batchId) =>
+    request(`/dashboard/people/${userId}${query(batchId)}`),
+  profileDetail: (profileId, batchId) =>
+    request(`/dashboard/profiles/${profileId}${query(batchId)}`),
 
   mySheets: (batchId) => request(`/batches/${batchId}/my-sheets`),
   setStatus: (assignmentId, status) =>

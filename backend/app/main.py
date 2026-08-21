@@ -24,9 +24,9 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, delete, func, insert, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from . import exports, ingest, matching
+from . import dashboard, exports, ingest, matching
 from .models import (COVER, MODES, SPLIT, Application, Assignment, Base, Batch,
-                     BatchApplication, Job, Profile, Upload, User,
+                     BatchApplication, Job, Profile, Setting, Upload, User,
                      applied_stamp, utcnow)
 from .schema import bring_up_to_date
 
@@ -151,6 +151,22 @@ def admin_only(user: User = Depends(current_user)) -> User:
     return user
 
 
+def can_see_dashboard(user: User) -> bool:
+    """Whether this person may look at their own figures.
+
+    A manager always may — both their own and anybody else's. For everyone
+    else it is off until a manager opens it, which is the whole point: being
+    measured on a screen should be a decision somebody made, not a side effect
+    of having an account.
+    """
+    return user.role == "admin" or user.dashboard_visible is True
+
+
+def require_dashboard(user: User) -> None:
+    if not can_see_dashboard(user):
+        raise HTTPException(403, "Your manager has not opened your dashboard yet.")
+
+
 def owned_profile(profile_id: int, db: Session, user: User) -> Profile:
     """The profile, if this person is allowed to act as it."""
     profile = db.get(Profile, profile_id)
@@ -175,6 +191,11 @@ class UserIn(BaseModel):
     name: str
     password: str
     role: str = "bd"
+    dashboard_visible: bool = False
+
+
+class UserPatch(BaseModel):
+    dashboard_visible: Optional[bool] = None
 
 
 class ProfileIn(BaseModel):
@@ -182,6 +203,7 @@ class ProfileIn(BaseModel):
     headline: str = ""
     platform: str = ""
     user_id: Optional[int] = None
+    share_progress: bool = True
 
 
 class ProfilePatch(BaseModel):
@@ -189,6 +211,11 @@ class ProfilePatch(BaseModel):
     headline: Optional[str] = None
     platform: Optional[str] = None
     user_id: Optional[int] = None
+    share_progress: Optional[bool] = None
+
+
+class SettingsIn(BaseModel):
+    team_board_visible: Optional[bool] = None
 
 
 class BatchIn(BaseModel):
@@ -221,13 +248,19 @@ class StatusIn(BaseModel):
 
 def user_json(u: User) -> dict:
     return {"id": u.id, "email": u.email, "name": u.name, "role": u.role,
-            "is_active": u.is_active}
+            "is_active": u.is_active,
+            # A manager's dashboard is never gated, so it reads True for them
+            # whatever the column says.
+            "dashboard_visible": can_see_dashboard(u)}
 
 
 def profile_json(p: Profile, owner: Optional[User] = None) -> dict:
     return {"id": p.id, "name": p.name, "headline": p.headline,
             "platform": p.platform, "user_id": p.user_id,
             "owner": owner.name if owner else None, "is_active": p.is_active,
+            # A NULL predates the column and the default is to share, so only an
+            # explicit False takes a profile off the board.
+            "share_progress": p.share_progress is not False,
             "label": p.name if not p.headline else f"{p.name} · {p.headline}"}
 
 
@@ -278,8 +311,22 @@ def create_user(body: UserIn, db: Session = Depends(get_db), _: User = Depends(a
     if len(body.password) < 8:
         raise HTTPException(400, "Use a password of at least 8 characters.")
     user = User(email=body.email.lower(), name=body.name.strip(),
-                password_hash=hash_password(body.password), role=body.role)
+                password_hash=hash_password(body.password), role=body.role,
+                dashboard_visible=body.dashboard_visible)
     db.add(user)
+    db.commit()
+    return user_json(user)
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(user_id: int, body: UserPatch, db: Session = Depends(get_db),
+                _: User = Depends(admin_only)):
+    """Open or close one person's dashboard."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "No such person.")
+    if body.dashboard_visible is not None:
+        user.dashboard_visible = body.dashboard_visible
     db.commit()
     return user_json(user)
 
@@ -325,7 +372,8 @@ def create_profile(body: ProfileIn, db: Session = Depends(get_db),
     if body.user_id is not None and not db.get(User, body.user_id):
         raise HTTPException(400, "No such person to run it.")
     profile = Profile(name=name, headline=body.headline.strip(),
-                      platform=body.platform.strip(), user_id=body.user_id)
+                      platform=body.platform.strip(), user_id=body.user_id,
+                      share_progress=body.share_progress)
     db.add(profile)
     db.commit()
     return profile_json(profile, db.get(User, profile.user_id) if profile.user_id else None)
@@ -354,6 +402,8 @@ def update_profile(profile_id: int, body: ProfilePatch, db: Session = Depends(ge
         if not db.get(User, body.user_id):
             raise HTTPException(400, "No such person to run it.")
         profile.user_id = body.user_id
+    if body.share_progress is not None:
+        profile.share_progress = body.share_progress
     db.commit()
     return profile_json(profile, db.get(User, profile.user_id) if profile.user_id else None)
 
@@ -1034,6 +1084,114 @@ def set_status(assignment_id: int, body: StatusIn, db: Session = Depends(get_db)
                                applied_on=applied_stamp()))
     db.commit()
     return {"ok": True, "status": row.status}
+
+
+# --------------------------------------------------------------------------- #
+# Workspace switches
+# --------------------------------------------------------------------------- #
+
+# Every switch and its value on a workspace that has never touched the screen.
+# Reading falls back to these, so a missing row is the default rather than an
+# error, and adding a switch never needs a migration.
+SETTING_DEFAULTS = {"team_board_visible": False}
+
+
+def read_settings(db: Session) -> dict:
+    stored = {row.key: row.value for row in db.scalars(select(Setting))}
+    return {key: stored.get(key, fallback) for key, fallback in SETTING_DEFAULTS.items()}
+
+
+@app.get("/api/settings")
+def get_settings(db: Session = Depends(get_db), _: User = Depends(current_user)):
+    """Readable by everyone: a BD's app needs to know whether to offer the
+    team board at all, and hiding the switch from them would not hide the tab."""
+    return read_settings(db)
+
+
+@app.patch("/api/settings")
+def update_settings(body: SettingsIn, db: Session = Depends(get_db),
+                    _: User = Depends(admin_only)):
+    for key, value in body.model_dump(exclude_none=True).items():
+        if key not in SETTING_DEFAULTS:
+            continue
+        row = db.get(Setting, key)
+        if row is None:
+            db.add(Setting(key=key, value=value))
+        else:
+            row.value = value
+    db.commit()
+    return read_settings(db)
+
+
+# --------------------------------------------------------------------------- #
+# Dashboards
+# --------------------------------------------------------------------------- #
+
+def _person_dashboard(db: Session, person: User, batch_id: Optional[int]) -> dict:
+    board_open = read_settings(db)["team_board_visible"] or person.role == "admin"
+    return {**dashboard.for_person(db, person, dashboard.pick_batch(db, batch_id),
+                                   team_visible=board_open),
+            "person": user_json(person)}
+
+
+@app.get("/api/dashboard/me")
+def dashboard_me(batch_id: Optional[int] = None, db: Session = Depends(get_db),
+                 user: User = Depends(current_user)):
+    """Your own progress — but only once a manager has opened it for you.
+
+    Checked here rather than only in the browser, because hiding a tab is not
+    the same as refusing a request.
+    """
+    require_dashboard(user)
+    return _person_dashboard(db, user, batch_id)
+
+
+@app.get("/api/dashboard/people/{user_id}")
+def dashboard_person(user_id: int, batch_id: Optional[int] = None,
+                     db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    """One person's dashboard, exactly as they would see it.
+
+    The same payload /dashboard/me returns for them, so what a manager checks
+    before opening it is what the person actually gets — not an approximation
+    of it built somewhere else.
+    """
+    person = db.get(User, user_id)
+    if person is None:
+        raise HTTPException(404, "No such person.")
+    return _person_dashboard(db, person, batch_id)
+
+
+@app.get("/api/dashboard/team")
+def dashboard_team(batch_id: Optional[int] = None, db: Session = Depends(get_db),
+                   user: User = Depends(current_user)):
+    """Every profile side by side.
+
+    Two gates, and both must be open: this person has a dashboard at all, and
+    the workspace shows the board to people who do.
+    """
+    require_dashboard(user)
+    if user.role != "admin" and not read_settings(db)["team_board_visible"]:
+        raise HTTPException(403, "Your manager has not opened the team board yet.")
+    return dashboard.team_board(db, dashboard.pick_batch(db, batch_id),
+                                include_private=user.role == "admin")
+
+
+@app.get("/api/dashboard/overview")
+def dashboard_overview(batch_id: Optional[int] = None, db: Session = Depends(get_db),
+                       _: User = Depends(admin_only)):
+    return {**dashboard.overview(db, dashboard.pick_batch(db, batch_id)),
+            "settings": read_settings(db)}
+
+
+@app.get("/api/dashboard/profiles/{profile_id}")
+def dashboard_profile(profile_id: int, batch_id: Optional[int] = None,
+                      db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """One profile close up. `owned_profile` is what stops a BD opening a
+    colleague's record — the team board shows totals, not somebody else's diary.
+    """
+    require_dashboard(user)
+    profile = owned_profile(profile_id, db, user)
+    return dashboard.profile_detail(db, profile, dashboard.pick_batch(db, batch_id))
 
 
 # --------------------------------------------------------------------------- #

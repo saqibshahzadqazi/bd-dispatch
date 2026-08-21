@@ -3,17 +3,22 @@ import { api, getToken, setToken } from "./api.js";
 import Login from "./views/Login.jsx";
 import BdHome from "./views/BdHome.jsx";
 import AdminHome from "./views/AdminHome.jsx";
+import Dashboard from "./views/Dashboard.jsx";
+import ManagerDashboard from "./views/ManagerDashboard.jsx";
 import People from "./views/People.jsx";
 
 export default function App() {
   const [user, setUser] = useState(null);
-  const [view, setView] = useState("work");
+  // Both roles land on their dashboard, when they have one — it is the screen
+  // that says what is waiting, and every route out of it is one button away.
+  // A BD whose manager has not opened theirs lands on their work instead.
+  const [view, setView] = useState("dashboard");
   const [booting, setBooting] = useState(true);
 
   const signOut = useCallback(() => {
     setToken("");
     setUser(null);
-    setView("work");
+    setView("dashboard");
   }, []);
 
   useEffect(() => {
@@ -26,7 +31,13 @@ export default function App() {
       setBooting(false);
       return;
     }
-    api.me().then(setUser).catch(() => setToken("")).finally(() => setBooting(false));
+    api.me()
+      .then((me) => {
+        setUser(me);
+        if (!me.dashboard_visible) setView("work");
+      })
+      .catch(() => setToken(""))
+      .finally(() => setBooting(false));
   }, []);
 
   if (booting) {
@@ -34,7 +45,10 @@ export default function App() {
   }
 
   if (!user) {
-    return <Login onSignedIn={setUser} />;
+    return <Login onSignedIn={(me) => {
+      setUser(me);
+      setView(me.dashboard_visible ? "dashboard" : "work");
+    }} />;
   }
 
   const isAdmin = user.role === "admin";
@@ -43,12 +57,20 @@ export default function App() {
     <>
       <header className="top">
         <span className="brand">Dispatch</span>
-        {isAdmin && (
-          <nav className="tabs">
-            <button className="tab" aria-current={view === "work"} onClick={() => setView("work")}>BATCHES</button>
-            <button className="tab" aria-current={view === "people"} onClick={() => setView("people")}>PEOPLE</button>
-          </nav>
-        )}
+        <nav className="tabs">
+          {/* No tab for a dashboard this person has not been given. The server
+              refuses the request too — this only saves them the dead end. */}
+          {user.dashboard_visible && (
+            <button className="tab" aria-current={view === "dashboard"}
+                    onClick={() => setView("dashboard")}>DASHBOARD</button>
+          )}
+          <button className="tab" aria-current={view === "work"}
+                  onClick={() => setView("work")}>{isAdmin ? "BATCHES" : "MY WORK"}</button>
+          {isAdmin && (
+            <button className="tab" aria-current={view === "people"}
+                    onClick={() => setView("people")}>PEOPLE</button>
+          )}
+        </nav>
         <span className="spacer" />
         <span className="muted">
           {user.name} · {isAdmin ? "manager" : "business development"}
@@ -57,9 +79,15 @@ export default function App() {
       </header>
 
       <main className="wrap">
-        {isAdmin
-          ? view === "people" ? <People /> : <AdminHome />
-          : <BdHome />}
+        {isAdmin ? (
+          view === "people" ? <People />
+            : view === "work" ? <AdminHome />
+              : <ManagerDashboard onOpenBatches={() => setView("work")} />
+        ) : (
+          view === "dashboard" && user.dashboard_visible
+            ? <Dashboard onOpenWork={() => setView("work")} />
+            : <BdHome />
+        )}
       </main>
     </>
   );

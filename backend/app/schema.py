@@ -31,6 +31,17 @@ LATER_COLUMNS = {
         ("last_built_at", "TIMESTAMP"),
         ("building_since", "TIMESTAMP"),
     ],
+    # TRUE rather than 1, because Postgres will not cast an integer to boolean
+    # in a column default and SQLite understands both. ADD COLUMN with a DEFAULT
+    # fills the existing rows, so profiles that predate the team board are on it.
+    "profiles": [
+        ("share_progress", "BOOLEAN DEFAULT TRUE"),
+    ],
+    # FALSE, so an upgrade does not hand every existing person a dashboard
+    # nobody chose to open. The manager turns them on one at a time.
+    "users": [
+        ("dashboard_visible", "BOOLEAN DEFAULT FALSE"),
+    ],
 }
 
 

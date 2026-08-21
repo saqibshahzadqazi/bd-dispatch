@@ -72,6 +72,29 @@ export default function People() {
     }
   };
 
+  const setDashboard = async (item, open) => {
+    try {
+      await api.updateUser(item.id, { dashboard_visible: open });
+      await load();
+      setNote({
+        text: open
+          ? `${item.name} can now see their own dashboard.`
+          : `${item.name}'s dashboard is closed. Their work is unaffected.`,
+      });
+    } catch (err) {
+      setNote({ bad: true, text: err.message });
+    }
+  };
+
+  const setShared = async (id, share) => {
+    try {
+      await api.updateProfile(id, { share_progress: share });
+      await load();
+    } catch (err) {
+      setNote({ bad: true, text: err.message });
+    }
+  };
+
   const retire = async (item) => {
     if (!window.confirm(
       `Retire ${item.name}? Its application history stays, so nothing it has already ` +
@@ -117,6 +140,11 @@ export default function People() {
           candidates, so both may go for the same job. The system only ever stops one
           profile applying to the same job twice.
         </p>
+        <p className="muted" style={{ marginTop: 6 }}>
+          <b>On the board</b> decides whether a profile appears on the shared team board.
+          It only matters once you open that board from the dashboard — until then nobody
+          but you sees anyone else's numbers.
+        </p>
         <div className="row" style={{ marginTop: 12 }}>
           <input placeholder="Profile name, e.g. Khuram" value={profile.name}
                  onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
@@ -137,7 +165,9 @@ export default function People() {
       <div className="card scroll">
         <table>
           <thead>
-            <tr><th>Profile</th><th>Resume</th><th>Platform</th><th>Run by</th><th /></tr>
+            <tr><th>Profile</th><th>Resume</th><th>Platform</th><th>Run by</th>
+                <th title="Whether this profile appears on the shared team board">On the board</th>
+                <th /></tr>
           </thead>
           <tbody>
             {profiles.map((item) => (
@@ -151,13 +181,20 @@ export default function People() {
                     {bds.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
                 </td>
+                <td>
+                  <label className="row" style={{ gap: 6 }}>
+                    <input type="checkbox" checked={item.share_progress !== false}
+                           onChange={(e) => setShared(item.id, e.target.checked)} />
+                    {item.share_progress === false ? "hidden" : "shown"}
+                  </label>
+                </td>
                 <td style={{ textAlign: "right" }}>
                   <button className="link" onClick={() => retire(item)}>Retire</button>
                 </td>
               </tr>
             ))}
             {!profiles.length && (
-              <tr><td colSpan={5} className="muted">
+              <tr><td colSpan={6} className="muted">
                 No profiles yet. Nobody can hand in a sheet until there is at least one.
               </td></tr>
             )}
@@ -167,6 +204,12 @@ export default function People() {
 
       <section className="card pad">
         <h2>Add a person</h2>
+        <p className="muted" style={{ marginTop: 6, maxWidth: 680 }}>
+          A new person starts with <b>no dashboard</b>. They can log jobs and work their list
+          straight away; the screen of figures — what they logged, how much a colleague also
+          found, how much of their list they have worked through — appears only once you open
+          it for them in the table below.
+        </p>
         <div className="row" style={{ marginTop: 12 }}>
           <input placeholder="Full name" value={person.name}
                  onChange={(e) => setPerson({ ...person, name: e.target.value })} />
@@ -190,7 +233,9 @@ export default function People() {
       <div className="card scroll">
         <table>
           <thead>
-            <tr><th>Name</th><th>Email</th><th>Role</th><th>Profiles they run</th><th>Status</th><th /></tr>
+            <tr><th>Name</th><th>Email</th><th>Role</th><th>Profiles they run</th><th>Status</th>
+                <th title="Whether this person may open their own dashboard of figures">Dashboard</th>
+                <th /></tr>
           </thead>
           <tbody>
             {people.map((p) => {
@@ -211,6 +256,20 @@ export default function People() {
                     <span className={p.is_active ? "pill on" : "pill off"}>
                       {p.is_active ? "active" : "switched off"}
                     </span>
+                  </td>
+                  <td>
+                    {p.role === "admin" ? (
+                      <span className="muted">always</span>
+                    ) : (
+                      <label className="row" style={{ gap: 6 }}>
+                        <input type="checkbox" checked={!!p.dashboard_visible}
+                               disabled={!p.is_active}
+                               onChange={(e) => setDashboard(p, e.target.checked)} />
+                        <span className={p.dashboard_visible ? "pill on" : "pill off"}>
+                          {p.dashboard_visible ? "open" : "closed"}
+                        </span>
+                      </label>
+                    )}
                   </td>
                   <td style={{ textAlign: "right" }}>
                     {p.is_active && <button className="link" onClick={() => turnOff(p)}>Switch off</button>}
