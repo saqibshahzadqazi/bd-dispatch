@@ -196,3 +196,306 @@ export function ProfileCard({ row, children, onOpen }) {
     </div>
   );
 }
+
+/* --------------------------------------------------------------------------
+   Developers, and what the applications turned into.
+
+   Everything above this line counts effort. Everything below it counts what
+   the effort produced, which is a different question and needs its own shapes.
+   -------------------------------------------------------------------------- */
+
+export const MODE_LABELS = {
+  video: "video call",
+  call: "phone call",
+  onsite: "on site",
+  async: "written",
+};
+
+export const AVAILABILITY_LABELS = {
+  open: "taking work",
+  limited: "limited",
+  booked: "booked up",
+};
+
+/** Only ever put an http(s) link in an href.
+ *
+ * The same rule as api.safeUrl, kept here so a widget has no reason to reach
+ * into the api module. Meeting links and resume links are typed by people and
+ * land in an href on somebody else's screen.
+ */
+function safeLink(value) {
+  return /^https?:\/\//i.test(value || "") ? value : "";
+}
+
+/** Whether the developer behind a profile could actually start.
+ *
+ * A BD reads this before applying under a profile. Winning an interview for
+ * somebody who cannot take the work costs the client goodwill as well as the
+ * developer an afternoon.
+ */
+export function Availability({ value, small = false }) {
+  const state = value || "open";
+  const tone = state === "open" ? "on" : state === "booked" ? "off" : "";
+  return (
+    <span className={`pill ${tone}`} style={small ? { fontSize: 10 } : undefined}>
+      {AVAILABILITY_LABELS[state] || state}
+    </span>
+  );
+}
+
+/** A comma-separated skills field, as something readable. */
+export function Skills({ value, limit = 8 }) {
+  const parts = (value || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return <span className="muted">no skills listed</span>;
+  return (
+    <span className="row" style={{ gap: 5 }}>
+      {parts.slice(0, limit).map((skill) => (
+        <span className="pill" key={skill}>{skill}</span>
+      ))}
+      {parts.length > limit && <span className="muted">+{parts.length - limit} more</span>}
+    </span>
+  );
+}
+
+/** Put a value on the clipboard.
+ *
+ * The clipboard API does not exist on plain http, so a failure is swallowed:
+ * the value is on the screen either way, and an error about copying an email
+ * address helps nobody.
+ */
+export function CopyButton({ value, label = "copy" }) {
+  const [done, setDone] = React.useState(false);
+  if (!value) return null;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setDone(true);
+      setTimeout(() => setDone(false), 1400);
+    } catch {
+      /* clipboard blocked — nothing useful to say about it */
+    }
+  };
+  return <button className="link" onClick={copy}>{done ? "copied" : label}</button>;
+}
+
+/** Applications in, interviews out, offers at the end of it.
+ *
+ * Drawn as steps rather than a funnel shape on purpose. A real funnel encodes
+ * each ratio twice — once in the number, once in the width — and the width is
+ * always the less accurate of the two. The rates are said in words underneath
+ * instead, where they can be qualified.
+ */
+export function Funnel({ data, note = "", awaiting = 0 }) {
+  if (!data) return null;
+  const steps = [
+    { label: "applications sent", value: data.applications,
+      foot: data.scoped_to_cycle ? "this cycle" : "all time" },
+    { label: "interviews", value: data.interviews,
+      foot: data.applications ? `${data.interview_rate}% of applications` : "—" },
+    { label: "offers", value: data.offers,
+      foot: data.interviews ? `${data.offer_rate}% of interviews` : "—" },
+    { label: "hired", value: data.hired, foot: data.hired ? "work won" : "—" },
+  ];
+  return (
+    <div className="card pad stack" style={{ gap: 10 }}>
+      <div className="funnel">
+        {steps.map((step, i) => (
+          <React.Fragment key={step.label}>
+            {i > 0 && <span className="funnel-arrow" aria-hidden="true">→</span>}
+            <div className="funnel-step">
+              <b className="mono">{step.value}</b>
+              <span>{step.label}</span>
+              <span className="foot">{step.foot}</span>
+            </div>
+          </React.Fragment>
+        ))}
+      </div>
+      {note && <p className="muted">{note}</p>}
+      {awaiting > 0 && (
+        <p className="muted">
+          {awaiting} interview{awaiting === 1 ? " has" : "s have"} been and gone without
+          anybody saying how it went, so these rates are understated until they do.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The next interview still ahead, sized to be read before anything else. */
+export function NextInterview({ row, onOpen, openLabel = "All interviews" }) {
+  if (!row) return null;
+  return (
+    <section className="card pad row headline" style={{ justifyContent: "space-between" }}>
+      <div>
+        <div className="mono headline-figure" style={{ fontSize: 32 }}>{row.when.time}</div>
+        <div>
+          <b style={{ fontFamily: "var(--display)", fontSize: 15 }}>
+            {row.is_today ? "Today" : row.when.label} · {row.client || "a client"}
+          </b>
+          <p className="muted" style={{ marginTop: 2 }}>
+            {row.role || "role not recorded"} · applying as <b>{row.profile}</b> ·{" "}
+            {MODE_LABELS[row.mode] || row.mode} · {row.duration_minutes} min · Eastern time
+          </p>
+        </div>
+      </div>
+      <div className="row">
+        {safeLink(row.link) && (
+          <a className="btn go" href={safeLink(row.link)} target="_blank" rel="noreferrer noopener">
+            Join
+          </a>
+        )}
+        {onOpen && <button className="ghost" onClick={onOpen}>{openLabel}</button>}
+      </div>
+    </section>
+  );
+}
+
+/** Interviews as a table. Leave `onChange` off for a screen that only reads. */
+export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
+                               empty = "Nothing scheduled." }) {
+  if (!rows?.length) return <div className="card pad muted">{empty}</div>;
+  return (
+    <div className="card scroll">
+      <table className="board">
+        <thead>
+          <tr>
+            <th style={{ width: 128 }}>When · ET</th>
+            {showProfile && <th>Applied as</th>}
+            <th>Client</th>
+            <th>Role</th>
+            <th>How</th>
+            <th style={{ width: 200 }}>How it went</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id} style={{ opacity: row.status === "cancelled" ? 0.5 : 1 }}>
+              <td>
+                <b className="mono">{row.when.time}</b>
+                <div className="muted" style={{ fontSize: 11 }}>
+                  {row.when.label.split(" · ")[0]}
+                </div>
+              </td>
+              {showProfile && (
+                <td>
+                  <b>{row.profile}</b>
+                  {row.developer && (
+                    <div className="muted" style={{ fontSize: 11 }}>{row.developer}</div>
+                  )}
+                </td>
+              )}
+              <td>{row.client || <span className="muted">—</span>}</td>
+              <td className="truncate">{row.role || <span className="muted">—</span>}</td>
+              <td className="muted">
+                {MODE_LABELS[row.mode] || row.mode}
+                <div style={{ fontSize: 11 }}>{row.duration_minutes} min</div>
+              </td>
+              <td>
+                {onChange ? (
+                  <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                    <select value={row.status}
+                            onChange={(e) => onChange(row.id, { status: e.target.value })}>
+                      <option value="scheduled">scheduled</option>
+                      <option value="done">happened</option>
+                      <option value="no_show">no show</option>
+                      <option value="cancelled">cancelled</option>
+                    </select>
+                    {(row.is_past || row.status === "done") && row.status !== "cancelled" && (
+                      <select value={row.outcome}
+                              onChange={(e) => onChange(row.id, { outcome: e.target.value })}>
+                        <option value="pending">not said yet</option>
+                        <option value="passed">next round</option>
+                        <option value="offer">offer</option>
+                        <option value="hired">hired</option>
+                        <option value="rejected">no</option>
+                      </select>
+                    )}
+                  </div>
+                ) : (
+                  <span className={row.outcome === "rejected" ? "pill off"
+                    : ["offer", "hired", "passed"].includes(row.outcome) ? "pill on" : "pill"}>
+                    {row.status === "scheduled" ? "scheduled" : row.outcome}
+                  </span>
+                )}
+                {row.awaiting_outcome && (
+                  <div style={{ fontSize: 11, color: "var(--brick)" }}>
+                    it happened — nobody has said how it went
+                  </div>
+                )}
+              </td>
+              <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                {safeLink(row.link) && (
+                  <a href={safeLink(row.link)} target="_blank" rel="noreferrer noopener">open</a>
+                )}
+                {onRemove && <button className="link" onClick={() => onRemove(row)}>remove</button>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Every developer, and whether they are free. The manager's version. */
+export function DeveloperBoard({ rows, onOpen }) {
+  return (
+    <div className="card scroll">
+      <table className="board">
+        <thead>
+          <tr>
+            <th>Developer</th>
+            <th>Applied as</th>
+            <th>Availability</th>
+            <th className="num">Today</th>
+            <th className="num">This week</th>
+            <th className="num" title="Interviews that have happened with no outcome recorded">
+              Unreported
+            </th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.user_id}>
+              <td>
+                <b>{row.name}</b>
+                <div className="muted mono" style={{ fontSize: 11 }}>{row.email}</div>
+              </td>
+              <td>
+                {row.profiles.length
+                  ? (
+                    <span className="row" style={{ gap: 5 }}>
+                      {row.profiles.map((p) => <span className="pill on" key={p.id}>{p.name}</span>)}
+                    </span>
+                  )
+                  : <span className="muted">no profile attached — they see an empty screen</span>}
+              </td>
+              <td>{row.runs ? <Availability value={row.availability} /> : <span className="muted">—</span>}</td>
+              <td className="mono num" style={{ color: row.today ? "var(--petrol)" : undefined }}>
+                {row.today}
+              </td>
+              <td className="mono num">{row.week}</td>
+              <td className="mono num" style={{ color: row.awaiting_outcome ? "var(--brick)" : undefined }}>
+                {row.awaiting_outcome}
+              </td>
+              <td style={{ textAlign: "right" }}>
+                {onOpen && (
+                  <button className="ghost" style={{ padding: "5px 9px", fontSize: 12 }}
+                          onClick={() => onOpen(row)}>Open</button>
+                )}
+              </td>
+            </tr>
+          ))}
+          {!rows.length && (
+            <tr><td colSpan={7} className="muted">
+              No developers yet. Add one under People and profiles, then attach it to the
+              profile it is sold under.
+            </td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}

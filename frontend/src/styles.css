@@ -156,3 +156,28 @@ tbody tr:hover { background: #faf9f6; }
   .headline-figure { font-size: 34px; }
   .figures { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* Developers, interviews, and what the applications turned into --------------- */
+
+/* An anchor styled as a button — the Join link on an interview has to be a real
+   link so it opens in a tab and can be copied, but reads as the action it is. */
+a.btn { display: inline-block; text-decoration: none; }
+
+/* Applications in, interviews out, offers at the end of it. Steps rather than a
+   tapering funnel: a width encodes the ratio a second time and always less
+   accurately than the number already does. Scrolls rather than wraps, so the
+   order of the steps survives a narrow screen. */
+.funnel { display: flex; align-items: stretch; gap: 10px; overflow-x: auto; }
+.funnel-step {
+  flex: 1 1 0; min-width: 116px; background: var(--paper);
+  border: 1px solid var(--rule); padding: 12px 14px;
+}
+.funnel-step b { display: block; font-size: 24px; font-weight: 500; line-height: 1.1; }
+.funnel-step span { display: block; font-size: 11.5px; color: var(--slate); }
+.funnel-step .foot { font-size: 10.5px; opacity: 0.8; margin-top: 2px; }
+.funnel-arrow { align-self: center; color: var(--slate); font-size: 15px; }
+
+@media (max-width: 640px) {
+  .funnel-step { min-width: 104px; padding: 10px; }
+  .funnel-step b { font-size: 19px; }
+}

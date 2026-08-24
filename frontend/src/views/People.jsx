@@ -1,8 +1,15 @@
 import React, { useEffect, useState } from "react";
-import { api } from "../api.js";
+import { api, safeUrl } from "../api.js";
+import { Availability } from "./widgets.jsx";
 
 const BLANK_PERSON = { name: "", email: "", password: "", role: "bd" };
-const BLANK_PROFILE = { name: "", headline: "", platform: "", user_id: "" };
+const BLANK_PROFILE = { name: "", headline: "", platform: "", user_id: "", dev_user_id: "" };
+
+const ROLE_LABELS = {
+  admin: "manager",
+  bd: "business development",
+  dev: "developer",
+};
 
 export default function People() {
   const [people, setPeople] = useState([]);
@@ -52,6 +59,7 @@ export default function People() {
         headline: profile.headline.trim(),
         platform: profile.platform.trim(),
         user_id: profile.user_id ? Number(profile.user_id) : null,
+        dev_user_id: profile.dev_user_id ? Number(profile.dev_user_id) : null,
       });
       setProfile(BLANK_PROFILE);
       await load();
@@ -67,6 +75,22 @@ export default function People() {
     try {
       await api.updateProfile(id, { user_id: Number(userId) });
       await load();
+    } catch (err) {
+      setNote({ bad: true, text: err.message });
+    }
+  };
+
+  const setDeveloper = async (item, userId) => {
+    try {
+      await api.updateProfile(item.id, { dev_user_id: Number(userId) });
+      await load();
+      const dev = people.find((p) => p.id === Number(userId));
+      setNote({
+        text: dev
+          ? `${dev.name} is now the developer behind ${item.name}. Interviews booked against `
+            + `that profile land on their screen, and they can keep the resume and email current.`
+          : `${item.name} has nobody behind it.`,
+      });
     } catch (err) {
       setNote({ bad: true, text: err.message });
     }
@@ -120,14 +144,21 @@ export default function People() {
   const personReady = person.name && person.email && person.password.length >= 8;
   const profileReady = profile.name.trim() && profile.user_id;
   const bds = people.filter((p) => p.is_active);
+  const devs = people.filter((p) => p.is_active && p.role === "dev");
 
   return (
     <div className="stack">
       <div>
         <h1>People and profiles</h1>
-        <p className="muted" style={{ marginTop: 3 }}>
+        <p className="muted" style={{ marginTop: 3, maxWidth: 780 }}>
           A <b>person</b> signs in. A <b>profile</b> is the identity a job is applied under —
           the name and resume the client sees. One person can run several.
+        </p>
+        <p className="muted" style={{ marginTop: 6, maxWidth: 780 }}>
+          Two people stand behind every profile and they are not the same person. The
+          <b> BD</b> runs the account and does the applying. The <b>developer</b> is who the
+          profile actually sells — the one who sits the interview and writes the code. Attach
+          them below and interviews reach them without anybody forwarding an email.
         </p>
       </div>
 
@@ -155,8 +186,17 @@ export default function People() {
                  onChange={(e) => setProfile({ ...profile, platform: e.target.value })} />
           <select value={profile.user_id}
                   onChange={(e) => setProfile({ ...profile, user_id: e.target.value })}>
-            <option value="">— who runs it? —</option>
+            <option value="">— which BD runs it? —</option>
             {bds.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <select value={profile.dev_user_id}
+                  onChange={(e) => setProfile({ ...profile, dev_user_id: e.target.value })}>
+            <option value="">— which developer is it? —</option>
+            {people.filter((p) => p.is_active).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}{p.role === "dev" ? "" : ` · ${ROLE_LABELS[p.role] || p.role}`}
+              </option>
+            ))}
           </select>
           <button onClick={addProfile} disabled={busy || !profileReady}>Add profile</button>
         </div>
@@ -165,21 +205,48 @@ export default function People() {
       <div className="card scroll">
         <table>
           <thead>
-            <tr><th>Profile</th><th>Resume</th><th>Platform</th><th>Run by</th>
+            <tr><th>Profile</th><th>Headline</th><th>Run by</th>
+                <th title="The person the client would actually be meeting">Developer</th>
+                <th title="What a BD attaches when applying under this profile">Resume</th>
                 <th title="Whether this profile appears on the shared team board">On the board</th>
                 <th /></tr>
           </thead>
           <tbody>
             {profiles.map((item) => (
               <tr key={item.id}>
-                <td style={{ fontWeight: 500 }}>{item.name}</td>
+                <td style={{ fontWeight: 500 }}>
+                  {item.name}
+                  {item.platform && (
+                    <div className="muted" style={{ fontSize: 11 }}>{item.platform}</div>
+                  )}
+                </td>
                 <td>{item.headline || <span className="muted">—</span>}</td>
-                <td className="muted">{item.platform || "—"}</td>
                 <td>
                   <select value={item.user_id || ""} onChange={(e) => reassign(item.id, e.target.value)}>
                     {!item.user_id && <option value="">— nobody —</option>}
                     {bds.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
+                </td>
+                <td>
+                  <select value={item.dev_user_id || ""}
+                          onChange={(e) => setDeveloper(item, e.target.value)}>
+                    <option value="">— nobody —</option>
+                    {people.filter((p) => p.is_active).map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}{p.role === "dev" ? "" : ` · ${ROLE_LABELS[p.role] || p.role}`}
+                      </option>
+                    ))}
+                  </select>
+                  {item.dev_user_id && (
+                    <div style={{ marginTop: 4 }}><Availability value={item.availability} small /></div>
+                  )}
+                </td>
+                <td>
+                  {safeUrl(item.resume_url)
+                    ? <a href={safeUrl(item.resume_url)} target="_blank" rel="noreferrer noopener">open</a>
+                    : <span className="muted" title="The developer sets this on their own screen">
+                        not set
+                      </span>}
                 </td>
                 <td>
                   <label className="row" style={{ gap: 6 }}>
@@ -194,7 +261,7 @@ export default function People() {
               </tr>
             ))}
             {!profiles.length && (
-              <tr><td colSpan={6} className="muted">
+              <tr><td colSpan={7} className="muted">
                 No profiles yet. Nobody can hand in a sheet until there is at least one.
               </td></tr>
             )}
@@ -205,10 +272,16 @@ export default function People() {
       <section className="card pad">
         <h2>Add a person</h2>
         <p className="muted" style={{ marginTop: 6, maxWidth: 680 }}>
-          A new person starts with <b>no dashboard</b>. They can log jobs and work their list
+          A new BD starts with <b>no dashboard</b>. They can log jobs and work their list
           straight away; the screen of figures — what they logged, how much a colleague also
           found, how much of their list they have worked through — appears only once you open
           it for them in the table below.
+        </p>
+        <p className="muted" style={{ marginTop: 6, maxWidth: 680 }}>
+          A <b>developer</b> is different, and the switch does not apply to them. Their screen
+          is their own diary and their own resume, not a set of figures somebody has to decide
+          to show them — so it works from the moment the account exists. Attach them to a
+          profile above or they sign in to an empty desk.
         </p>
         <div className="row" style={{ marginTop: 12 }}>
           <input placeholder="Full name" value={person.name}
@@ -219,6 +292,7 @@ export default function People() {
                  onChange={(e) => setPerson({ ...person, password: e.target.value })} />
           <select value={person.role} onChange={(e) => setPerson({ ...person, role: e.target.value })}>
             <option value="bd">Business development</option>
+            <option value="dev">Developer</option>
             <option value="admin">Manager</option>
           </select>
           <button onClick={addPerson} disabled={busy || !personReady}>Add</button>
@@ -233,24 +307,32 @@ export default function People() {
       <div className="card scroll">
         <table>
           <thead>
-            <tr><th>Name</th><th>Email</th><th>Role</th><th>Profiles they run</th><th>Status</th>
+            <tr><th>Name</th><th>Email</th><th>Role</th><th>Profiles</th><th>Status</th>
                 <th title="Whether this person may open their own dashboard of figures">Dashboard</th>
                 <th /></tr>
           </thead>
           <tbody>
             {people.map((p) => {
-              const theirs = profiles.filter((item) => item.user_id === p.id);
+              // A BD is measured on the profiles they run; a developer on the
+              // ones they are sold under. Same column, two different questions.
+              const theirs = p.role === "dev"
+                ? profiles.filter((item) => item.dev_user_id === p.id)
+                : profiles.filter((item) => item.user_id === p.id);
               return (
                 <tr key={p.id} style={{ opacity: p.is_active ? 1 : 0.5 }}>
                   <td style={{ fontWeight: 500 }}>{p.name}</td>
                   <td className="mono" style={{ fontSize: 12 }}>{p.email}</td>
-                  <td className="muted">{p.role === "admin" ? "manager" : "business development"}</td>
+                  <td className="muted">{ROLE_LABELS[p.role] || p.role}</td>
                   <td>
                     {theirs.length
                       ? <span className="row" style={{ gap: 5 }}>
                           {theirs.map((item) => <span className="pill on" key={item.id}>{item.name}</span>)}
                         </span>
-                      : <span className="muted">none yet</span>}
+                      : <span className="muted">
+                          {p.role === "dev"
+                            ? "not behind any profile — they see an empty desk"
+                            : "none yet"}
+                        </span>}
                   </td>
                   <td>
                     <span className={p.is_active ? "pill on" : "pill off"}>
@@ -260,6 +342,10 @@ export default function People() {
                   <td>
                     {p.role === "admin" ? (
                       <span className="muted">always</span>
+                    ) : p.role === "dev" ? (
+                      <span className="muted" title="A developer sees their own diary and resume, which is not a figure anybody has to decide to show them.">
+                        not a figures screen
+                      </span>
                     ) : (
                       <label className="row" style={{ gap: 6 }}>
                         <input type="checkbox" checked={!!p.dashboard_visible}

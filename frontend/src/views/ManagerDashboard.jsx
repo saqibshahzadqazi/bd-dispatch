@@ -1,7 +1,116 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, safeUrl } from "../api.js";
-import { CyclePicker, Progress, Sparkline, TeamBoard, Tiles, sinceText } from "./widgets.jsx";
+import {
+  Availability, CyclePicker, DeveloperBoard, Funnel, InterviewRows, Progress,
+  Skills, Sparkline, TeamBoard, Tiles, sinceText,
+} from "./widgets.jsx";
 import PersonDashboard from "./PersonDashboard.jsx";
+
+/** One developer, close up.
+ *
+ * The manager checking on the half of the operation that does not type: who is
+ * free, what is in their diary, and which interviews nobody has reported back
+ * on. Outcomes are editable from here on purpose — the person chasing them is
+ * usually the one on this screen.
+ */
+function DeveloperView({ person, batchId, onClose }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    api.developerDashboard(person.user_id, batchId)
+      .then(setData).catch((err) => setError(err.message));
+  }, [person.user_id, batchId]);
+
+  useEffect(() => { setData(null); load(); }, [load]);
+
+  const change = (id, patch) =>
+    api.updateInterview(id, patch).then(load).catch((err) => setError(err.message));
+
+  if (error) return <div className="notice">{error}</div>;
+  if (!data) return <div className="card pad muted">Loading…</div>;
+
+  const { counts, funnel } = data;
+
+  return (
+    <section className="card pad stack detail" style={{ gap: 14 }}>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <h2>{data.developer.name}</h2>
+          <p className="muted" style={{ marginTop: 3 }}>
+            {data.profiles.length
+              ? <>Applied as {data.profiles.map((p) => p.name).join(", ")} · this is their own screen.</>
+              : "Not behind any profile, so they sign in to an empty desk."}
+          </p>
+        </div>
+        <button className="link" onClick={onClose}>Close</button>
+      </div>
+
+      <Tiles items={[
+        { label: "today", value: counts.today, tone: counts.today ? "petrol" : undefined },
+        { label: "next seven days", value: counts.week },
+        { label: "no outcome recorded", value: counts.awaiting_outcome,
+          tone: counts.awaiting_outcome ? "brick" : undefined },
+        { label: "offers", value: funnel.offers, tone: funnel.offers ? "pine" : undefined },
+        { label: "applications in their name", value: funnel.applications, foot: "all time" },
+        { label: "reached an interview", value: `${funnel.interview_rate}%` },
+      ]} />
+
+      <Funnel data={funnel} awaiting={counts.awaiting_outcome} />
+
+      {data.profiles.length > 0 && (
+        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
+          {data.profiles.map((row) => (
+            <div className="card pad stack" key={row.profile_id} style={{ gap: 8 }}>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div>
+                  <b style={{ fontFamily: "var(--display)" }}>{row.name}</b>
+                  <div className="muted">{row.headline || "—"}
+                    {row.person ? ` · run by ${row.person}` : " · nobody runs it"}</div>
+                </div>
+                <Availability value={row.availability} small />
+              </div>
+              <Skills value={row.skills} limit={5} />
+              <div className="row muted" style={{ gap: 10, fontSize: 12 }}>
+                <span>{row.email || "no email"}</span>
+                {safeUrl(row.resume_url)
+                  ? <a href={safeUrl(row.resume_url)} target="_blank" rel="noreferrer noopener">resume</a>
+                  : <span style={{ color: "var(--brick)" }}>no resume link</span>}
+                {row.rate && <span>{row.rate}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {data.today.length > 0 && (
+        <div>
+          <h3>Today</h3>
+          <div style={{ marginTop: 8 }}>
+            <InterviewRows rows={data.today} showProfile onChange={change} />
+          </div>
+        </div>
+      )}
+
+      <div>
+        <h3>Coming up</h3>
+        <div style={{ marginTop: 8 }}>
+          <InterviewRows rows={data.upcoming} showProfile onChange={change}
+                         empty="Nothing booked in the next fortnight." />
+        </div>
+      </div>
+
+      {data.recent.length > 0 && (
+        <div>
+          <h3>What happened</h3>
+          <div style={{ marginTop: 8 }}>
+            <InterviewRows rows={data.recent} showProfile onChange={change} />
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
 
 /** One profile, close up. Opened by clicking a row on either table. */
 function ProfileDetail({ profileId, batchId, onClose }) {
@@ -202,6 +311,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
   const [batchId, setBatchId] = useState(null);
   const [openProfile, setOpenProfile] = useState(null);
   const [openPerson, setOpenPerson] = useState(null);
+  const [openDev, setOpenDev] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [note, setNote] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -271,6 +381,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
   if (!data) return <p className="muted">Loading the dashboard…</p>;
 
   const { org, batch, people, profiles, missing, settings } = data;
+  const diary = data.interviews;
   const boardOpen = !!settings?.team_board_visible;
   const closedCount = people.filter((p) => p.role !== "admin" && !p.dashboard_visible).length;
 
@@ -318,6 +429,77 @@ export default function ManagerDashboard({ onOpenBatches }) {
           {" "}{missing.length === 1 ? "has" : "have"} not handed in for this cycle. The lists
           rebuild without them until they do.
         </div>
+      )}
+
+      {diary && diary.counts.today > 0 && (
+        <div className="notice gate">
+          <b>{diary.counts.today} interview{diary.counts.today === 1 ? "" : "s"} today.</b>{" "}
+          {diary.today.map((row) => `${row.when.time} ${row.profile}`
+            + `${row.client ? ` · ${row.client}` : ""}`).join(" · ")} — Eastern time.
+        </div>
+      )}
+
+      {diary && diary.counts.awaiting_outcome > 0 && (
+        <div className="notice">
+          <b>{diary.counts.awaiting_outcome} interview
+          {diary.counts.awaiting_outcome === 1 ? " has" : "s have"} happened with nobody saying
+          how it went.</b> Every rate below is understated until they do. The developer who sat
+          in the room can record it from their own screen, and so can you, from their row under
+          <b> The developers</b>.
+        </div>
+      )}
+
+      <section className="stack" style={{ gap: 10 }}>
+        <div>
+          <h2>What the applications produced</h2>
+          <p className="muted" style={{ marginTop: 3, maxWidth: 780 }}>
+            Everything above this counts effort — rows typed, duplication avoided, lists worked
+            through — and a team can improve every one of those figures without winning a single
+            piece of work. This is the other half, and the only part of it a client decides.
+          </p>
+        </div>
+        <Funnel data={data.funnel} awaiting={diary?.counts.awaiting_outcome || 0}
+                note="Applications are all-time across the workspace. Interviews are never
+                      filtered to a cycle: a reply that lands three weeks late belongs to the
+                      work that earned it, not to whichever cycle happened to be open." />
+
+        {diary?.today.length > 0 && (
+          <div>
+            <h3>Interviews today</h3>
+            <div style={{ marginTop: 8 }}>
+              <InterviewRows rows={diary.today} showProfile />
+            </div>
+          </div>
+        )}
+        {diary?.upcoming.length > 0 && (
+          <div>
+            <h3>Coming up</h3>
+            <div style={{ marginTop: 8 }}>
+              <InterviewRows rows={diary.upcoming.slice(0, 12)} showProfile />
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="stack" style={{ gap: 10 }}>
+        <div>
+          <h2>The developers</h2>
+          <p className="muted" style={{ marginTop: 3, maxWidth: 780 }}>
+            The half of the operation that does not type. Who is behind each profile, whether
+            they could start on Monday, and what is in their diary. <b>Open</b> shows you their
+            screen as they see it.
+          </p>
+        </div>
+        <DeveloperBoard rows={data.developers || []} onOpen={(row) => {
+          setOpenDev(row);
+          setOpenPerson(null);
+          setOpenProfile(null);
+        }} />
+      </section>
+
+      {openDev && (
+        <DeveloperView person={openDev} batchId={batchId || batch?.id}
+                       onClose={() => setOpenDev(null)} />
       )}
 
       <section className="card pad stack" style={{ gap: 12 }}>

@@ -1,5 +1,8 @@
 import React from "react";
-import { CyclePicker, ProfileCard, Sparkline, TeamBoard, Tiles, sinceText } from "./widgets.jsx";
+import {
+  CyclePicker, Funnel, InterviewRows, NextInterview, ProfileCard, Sparkline,
+  TeamBoard, Tiles, sinceText,
+} from "./widgets.jsx";
 
 /** One person's progress.
  *
@@ -18,6 +21,11 @@ export default function PersonDashboard({
   const { totals, profiles, batch } = data;
   const left = totals.pending;
   const mine = viewingAs ? [] : profiles.map((p) => p.profile_id);
+
+  // An interview this afternoon outranks an unworked list every time, so when
+  // there is one it goes above the headline rather than below it.
+  const diary = data.interviews;
+  const next = diary?.today.find((row) => !row.is_past && row.status === "scheduled") || null;
 
   // Every label that names an owner, in one place. `whose` reads as "your" or
   // "Ali's"; `did` as "you logged" or "Ali logged".
@@ -54,6 +62,11 @@ export default function PersonDashboard({
 
       {error && <div className="notice">{error}</div>}
 
+      {next && (
+        <NextInterview row={next} onOpen={onOpenWork}
+                       openLabel={onOpenWork ? "Open the diary" : undefined} />
+      )}
+
       {/* The one number worth acting on, and the way to act on it. */}
       <section className="card pad row headline" style={{ justifyContent: "space-between" }}>
         <div>
@@ -88,7 +101,52 @@ export default function PersonDashboard({
         { label: `of ${whose} list worked through`, value: `${totals.done_pct}%` },
         { label: `day${data.streak === 1 ? "" : "s"} logging in a row`, value: data.streak,
           hint: "Consecutive working days with at least one job logged. Today does not break it until tomorrow." },
+        diary && { label: "interviews today", value: diary.counts.today,
+          tone: diary.counts.today ? "petrol" : undefined,
+          foot: diary.counts.week ? `${diary.counts.week} in seven days` : undefined,
+          hint: "Against the profiles these figures cover. Eastern time." },
       ]} />
+
+      {diary && (diary.counts.total > 0 || data.funnel.applications > 0) && (
+        <section className="stack" style={{ gap: 10 }}>
+          <div>
+            <h2>What {whose} applications turned into</h2>
+            <p className="muted" style={{ marginTop: 3, maxWidth: 760 }}>
+              Every other figure on this screen counts effort, and all of them go up when
+              somebody types faster. These do not. They only move when the work was worth
+              sending.
+            </p>
+          </div>
+          <Funnel data={data.funnel} awaiting={diary.counts.awaiting_outcome} />
+
+          {diary.today.length > 0 && (
+            <div>
+              <h3>Today</h3>
+              <div style={{ marginTop: 8 }}>
+                <InterviewRows rows={diary.today} showProfile />
+              </div>
+            </div>
+          )}
+          {diary.upcoming.length > 0 && (
+            <div>
+              <h3>Coming up</h3>
+              <div style={{ marginTop: 8 }}>
+                <InterviewRows rows={diary.upcoming.slice(0, 8)} showProfile />
+              </div>
+            </div>
+          )}
+          {diary.counts.awaiting_outcome > 0 && (
+            <div className="notice">
+              <b>{diary.counts.awaiting_outcome} interview
+              {diary.counts.awaiting_outcome === 1 ? " has" : "s have"} been and gone with no
+              outcome recorded.</b> {onOpenWork
+                ? "Record them under My work → Interviews."
+                : `${viewingAs} can record them under My work → Interviews.`} Until somebody
+              does, the rates above read lower than the truth.
+            </div>
+          )}
+        </section>
+      )}
 
       <section>
         <h3>What {viewingAs || "you"} logged, day by day</h3>

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import os
+import re
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Iterable, Optional
@@ -24,10 +25,12 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, delete, func, insert, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from . import dashboard, exports, ingest, matching
-from .models import (COVER, MODES, SPLIT, Application, Assignment, Base, Batch,
-                     BatchApplication, Job, Profile, Setting, Upload, User,
-                     applied_stamp, utcnow)
+from . import dashboard, exports, ingest, interviews, matching
+from .models import (AVAILABILITY, COVER, INTERVIEW_MODES, INTERVIEW_OUTCOMES,
+                     INTERVIEW_STATUSES, MODES, ROLES, SPLIT, Application,
+                     Assignment, Base, Batch, BatchApplication, Interview, Job,
+                     Profile, Setting, Upload, User, applied_stamp,
+                     from_working, utcnow, working_label)
 from .schema import bring_up_to_date
 
 def _database_url() -> str:
@@ -84,7 +87,7 @@ async def lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Dispatch", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="Dispatch", version="2.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in CORS_ORIGINS if o.strip()],
@@ -168,13 +171,93 @@ def require_dashboard(user: User) -> None:
 
 
 def owned_profile(profile_id: int, db: Session, user: User) -> Profile:
-    """The profile, if this person is allowed to act as it."""
+    """The profile, if this person is allowed to act *as* it.
+
+    Working the list, handing in a sheet, marking a job applied — everything
+    that speaks to a client in the profile's name. That is the BD who runs the
+    account, and nobody else. The developer behind the profile is deliberately
+    not included: they are the person the client will meet, not the person
+    applying, and letting them mark jobs applied would put work in a colleague's
+    record that colleague did not do.
+    """
     profile = db.get(Profile, profile_id)
     if profile is None or not profile.is_active:
         raise HTTPException(404, "No such profile.")
     if user.role != "admin" and profile.user_id != user.id:
         raise HTTPException(403, "That profile belongs to someone else.")
     return profile
+
+
+def linked_profile(profile_id: int, db: Session, user: User) -> Profile:
+    """The profile, if this person has any business with it at all.
+
+    A wider door than owned_profile, for the things both sides of a profile
+    share — the interview, the resume, the record of how it is doing. Three
+    ways to be through it: you manage the workspace, you run the account the
+    applications go out from, or you are the developer the client will be
+    talking to.
+    """
+    profile = db.get(Profile, profile_id)
+    if profile is None or not profile.is_active:
+        raise HTTPException(404, "No such profile.")
+    if user.role == "admin" or profile.user_id == user.id:
+        return profile
+    if profile.dev_user_id is not None and profile.dev_user_id == user.id:
+        return profile
+    raise HTTPException(403, "That profile belongs to someone else.")
+
+
+def visible_profile_ids(db: Session, user: User) -> Optional[list[int]]:
+    """Whose interviews this person may see. None means every one of them,
+    which is only ever a manager.
+
+    A BD sees the profiles they run; a developer sees the ones they are sold
+    under. An empty list is a real answer — somebody with no profile attached
+    sees nothing, not everything.
+    """
+    if user.role == "admin":
+        return None
+    column = Profile.dev_user_id if user.role == "dev" else Profile.user_id
+    return [row for (row,) in db.execute(
+        select(Profile.id).where(Profile.is_active == True,  # noqa: E712
+                                 column == user.id)).all()]
+
+
+# Fields on a profile that describe the developer rather than the identity.
+# The developer keeps these current themselves; everything else about a profile
+# — its name, who runs it, whether it is on the team board — is the manager's.
+DEV_EDITABLE = ("email", "resume_url", "skills", "timezone", "rate",
+                "availability", "bio")
+
+
+def _check_availability(value: str) -> str:
+    cleaned = (value or "open").strip().lower()
+    if cleaned not in AVAILABILITY:
+        raise HTTPException(400, f"Availability must be one of {', '.join(AVAILABILITY)}.")
+    return cleaned
+
+
+def _check_email(value: str) -> str:
+    cleaned = (value or "").strip()
+    if cleaned and "@" not in cleaned:
+        raise HTTPException(400, "That does not look like an email address.")
+    return cleaned[:255]
+
+
+def _check_link(value: str, what: str) -> str:
+    """A link typed by a person, on its way into somebody else's href.
+
+    Stricter than the sheet reader, which tolerates a bare hostname because
+    spreadsheets are full of them. This one is typed into a form by somebody
+    who can be told to fix it, and a relative link on a colleague's screen goes
+    nowhere useful.
+    """
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+    if not re.match(r"^https?://", cleaned, re.I):
+        raise HTTPException(400, f"The {what} needs to start with http:// or https://.")
+    return cleaned[:2000]
 
 
 # --------------------------------------------------------------------------- #
@@ -204,6 +287,16 @@ class ProfileIn(BaseModel):
     platform: str = ""
     user_id: Optional[int] = None
     share_progress: bool = True
+    # The developer behind the identity. All optional: a profile can be created
+    # before anybody is attached to it, and filled in later by whoever it is.
+    dev_user_id: Optional[int] = None
+    email: str = ""
+    resume_url: str = ""
+    skills: str = ""
+    timezone: str = ""
+    rate: str = ""
+    availability: str = "open"
+    bio: str = ""
 
 
 class ProfilePatch(BaseModel):
@@ -212,6 +305,40 @@ class ProfilePatch(BaseModel):
     platform: Optional[str] = None
     user_id: Optional[int] = None
     share_progress: Optional[bool] = None
+    dev_user_id: Optional[int] = None
+    email: Optional[str] = None
+    resume_url: Optional[str] = None
+    skills: Optional[str] = None
+    timezone: Optional[str] = None
+    rate: Optional[str] = None
+    availability: Optional[str] = None
+    bio: Optional[str] = None
+
+
+class InterviewIn(BaseModel):
+    profile_id: int
+    # "2026-08-24T14:30", read as the clock the team works to. See
+    # models.from_working — the browser never decides what that means.
+    scheduled_at: str
+    client: str = ""
+    role: str = ""
+    mode: str = "video"
+    duration_minutes: int = 30
+    link: str = ""
+    notes: str = ""
+    job_id: Optional[int] = None
+
+
+class InterviewPatch(BaseModel):
+    scheduled_at: Optional[str] = None
+    client: Optional[str] = None
+    role: Optional[str] = None
+    mode: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    link: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None
+    outcome: Optional[str] = None
 
 
 class SettingsIn(BaseModel):
@@ -254,13 +381,28 @@ def user_json(u: User) -> dict:
             "dashboard_visible": can_see_dashboard(u)}
 
 
-def profile_json(p: Profile, owner: Optional[User] = None) -> dict:
+def profile_json(p: Profile, owner: Optional[User] = None,
+                 developer: Optional[User] = None) -> dict:
     return {"id": p.id, "name": p.name, "headline": p.headline,
             "platform": p.platform, "user_id": p.user_id,
             "owner": owner.name if owner else None, "is_active": p.is_active,
             # A NULL predates the column and the default is to share, so only an
             # explicit False takes a profile off the board.
             "share_progress": p.share_progress is not False,
+            # The developer, and what a client is handed when this identity
+            # applies. Every one of these may be empty — a profile nobody has
+            # filled in behaves exactly as it did before they existed, and the
+            # screens show nothing rather than something wrong.
+            "dev_user_id": p.dev_user_id,
+            "developer": developer.name if developer else None,
+            "developer_email": developer.email if developer else None,
+            "email": p.email or "",
+            "resume_url": p.resume_url or "",
+            "skills": p.skills or "",
+            "timezone": p.timezone or "",
+            "rate": p.rate or "",
+            "availability": p.availability or "open",
+            "bio": p.bio or "",
             "label": p.name if not p.headline else f"{p.name} · {p.headline}"}
 
 
@@ -306,8 +448,8 @@ def list_users(db: Session = Depends(get_db), _: User = Depends(admin_only)):
 def create_user(body: UserIn, db: Session = Depends(get_db), _: User = Depends(admin_only)):
     if db.scalar(select(User).where(User.email == body.email.lower())):
         raise HTTPException(409, "Someone already uses that email.")
-    if body.role not in ("admin", "bd"):
-        raise HTTPException(400, "Role must be admin or bd.")
+    if body.role not in ROLES:
+        raise HTTPException(400, f"Role must be one of {', '.join(ROLES)}.")
     if len(body.password) < 8:
         raise HTTPException(400, "Use a password of at least 8 characters.")
     user = User(email=body.email.lower(), name=body.name.strip(),
@@ -350,13 +492,30 @@ def deactivate_user(user_id: int, db: Session = Depends(get_db), admin: User = D
 @app.get("/api/profiles")
 def list_profiles(mine: bool = False, db: Session = Depends(get_db),
                   user: User = Depends(current_user)):
-    """Managers see every profile. A BD sees the ones they run."""
+    """Managers see every profile. A BD sees the ones they run, a developer the
+    ones they are sold under."""
     query = select(Profile).where(Profile.is_active == True)  # noqa: E712
-    if mine or user.role != "admin":
+    if user.role == "dev":
+        query = query.where(Profile.dev_user_id == user.id)
+    elif mine or user.role != "admin":
         query = query.where(Profile.user_id == user.id)
     owners = {u.id: u for u in db.scalars(select(User)).all()}
-    return [profile_json(p, owners.get(p.user_id))
+    return [profile_json(p, owners.get(p.user_id), owners.get(p.dev_user_id))
             for p in db.scalars(query.order_by(Profile.name)).all()]
+
+
+@app.get("/api/profiles/{profile_id}")
+def get_profile(profile_id: int, db: Session = Depends(get_db),
+                user: User = Depends(current_user)):
+    """One profile in full — the identity and the developer behind it.
+
+    Readable by both sides of it, because both need it: the BD is about to
+    paste that resume link into an application, and the developer wrote it.
+    """
+    profile = linked_profile(profile_id, db, user)
+    return profile_json(profile,
+                        db.get(User, profile.user_id) if profile.user_id else None,
+                        db.get(User, profile.dev_user_id) if profile.dev_user_id else None)
 
 
 @app.post("/api/profiles", status_code=201)
@@ -371,20 +530,52 @@ def create_profile(body: ProfileIn, db: Session = Depends(get_db),
                                  "Two profiles with one name would split its history in half.")
     if body.user_id is not None and not db.get(User, body.user_id):
         raise HTTPException(400, "No such person to run it.")
+    if body.dev_user_id is not None and not db.get(User, body.dev_user_id):
+        raise HTTPException(400, "No such person to be the developer behind it.")
     profile = Profile(name=name, headline=body.headline.strip(),
                       platform=body.platform.strip(), user_id=body.user_id,
-                      share_progress=body.share_progress)
+                      share_progress=body.share_progress,
+                      dev_user_id=body.dev_user_id,
+                      email=_check_email(body.email),
+                      resume_url=_check_link(body.resume_url, "resume link"),
+                      skills=body.skills.strip()[:400],
+                      timezone=body.timezone.strip()[:64],
+                      rate=body.rate.strip()[:40],
+                      availability=_check_availability(body.availability),
+                      bio=body.bio.strip())
     db.add(profile)
     db.commit()
-    return profile_json(profile, db.get(User, profile.user_id) if profile.user_id else None)
+    return profile_json(profile,
+                        db.get(User, profile.user_id) if profile.user_id else None,
+                        db.get(User, profile.dev_user_id) if profile.dev_user_id else None)
 
 
 @app.patch("/api/profiles/{profile_id}")
 def update_profile(profile_id: int, body: ProfilePatch, db: Session = Depends(get_db),
-                   _: User = Depends(admin_only)):
+                   user: User = Depends(current_user)):
+    """The manager edits anything. The developer edits their own details.
+
+    Which resume link goes out, which address a client replies to, whether they
+    can take work next week — that is the developer's own information, and
+    routing every correction through a manager is how it ends up out of date.
+    The identity itself — its name, who runs it, whether it is on the team
+    board — stays the manager's, because those decide what other people see.
+    """
     profile = db.get(Profile, profile_id)
     if not profile:
         raise HTTPException(404, "No such profile.")
+
+    asked = set(body.model_dump(exclude_unset=True))
+    if user.role != "admin":
+        if profile.dev_user_id is None or profile.dev_user_id != user.id:
+            raise HTTPException(403, "Only a manager can change that profile.")
+        beyond = sorted(asked - set(DEV_EDITABLE))
+        if beyond:
+            raise HTTPException(
+                403, f"Only a manager can change {', '.join(beyond)}. "
+                     "Your own details — email, resume, skills, rate, timezone, "
+                     "availability — are yours to keep current.")
+
     if body.name is not None:
         name = body.name.strip()
         if not name:
@@ -404,8 +595,28 @@ def update_profile(profile_id: int, body: ProfilePatch, db: Session = Depends(ge
         profile.user_id = body.user_id
     if body.share_progress is not None:
         profile.share_progress = body.share_progress
+    if body.dev_user_id is not None:
+        if not db.get(User, body.dev_user_id):
+            raise HTTPException(400, "No such person to be the developer behind it.")
+        profile.dev_user_id = body.dev_user_id
+    if body.email is not None:
+        profile.email = _check_email(body.email)
+    if body.resume_url is not None:
+        profile.resume_url = _check_link(body.resume_url, "resume link")
+    if body.skills is not None:
+        profile.skills = body.skills.strip()[:400]
+    if body.timezone is not None:
+        profile.timezone = body.timezone.strip()[:64]
+    if body.rate is not None:
+        profile.rate = body.rate.strip()[:40]
+    if body.availability is not None:
+        profile.availability = _check_availability(body.availability)
+    if body.bio is not None:
+        profile.bio = body.bio.strip()
     db.commit()
-    return profile_json(profile, db.get(User, profile.user_id) if profile.user_id else None)
+    return profile_json(profile,
+                        db.get(User, profile.user_id) if profile.user_id else None,
+                        db.get(User, profile.dev_user_id) if profile.dev_user_id else None)
 
 
 @app.delete("/api/profiles/{profile_id}")
@@ -1049,8 +1260,10 @@ def my_sheets(batch_id: int, db: Session = Depends(get_db), user: User = Depends
     if user.role != "admin":
         query = query.where(Profile.user_id == user.id)
     mine = db.scalars(query.order_by(Profile.name)).all()
+    people = {u.id: u for u in db.scalars(select(User)).all()}
     return {"batch_id": batch_id,
-            "profiles": [{**profile_json(p, user if p.user_id == user.id else None),
+            "profiles": [{**profile_json(p, people.get(p.user_id),
+                                         people.get(p.dev_user_id)),
                           "jobs": _assignment_rows(db, batch_id, p.id)} for p in mine]}
 
 
@@ -1186,12 +1399,213 @@ def dashboard_overview(batch_id: Optional[int] = None, db: Session = Depends(get
 @app.get("/api/dashboard/profiles/{profile_id}")
 def dashboard_profile(profile_id: int, batch_id: Optional[int] = None,
                       db: Session = Depends(get_db), user: User = Depends(current_user)):
-    """One profile close up. `owned_profile` is what stops a BD opening a
+    """One profile close up. `linked_profile` is what stops a BD opening a
     colleague's record — the team board shows totals, not somebody else's diary.
+
+    The developer behind a profile may open it without the dashboard switch a
+    BD's figures sit behind. That switch exists so nobody is measured on a
+    screen without somebody deciding to; this is the record of an identity that
+    goes out in their name, which they are entitled to read.
     """
-    require_dashboard(user)
-    profile = owned_profile(profile_id, db, user)
+    profile = linked_profile(profile_id, db, user)
+    if not (user.role == "dev" and profile.dev_user_id == user.id):
+        require_dashboard(user)
     return dashboard.profile_detail(db, profile, dashboard.pick_batch(db, batch_id))
+
+
+@app.get("/api/dashboard/dev")
+def dashboard_developer(batch_id: Optional[int] = None, db: Session = Depends(get_db),
+                        user: User = Depends(current_user)):
+    """A developer's own screen: their calendar, their identities, their record.
+
+    Open to them from the moment the account exists. A developer who cannot see
+    their own interviews misses them, which is a different kind of harm from a
+    BD seeing a figure nobody meant to show them.
+    """
+    if user.role not in ("dev", "admin"):
+        raise HTTPException(403, "This screen is for the developers behind the profiles.")
+    return dashboard.for_developer(db, user, dashboard.pick_batch(db, batch_id))
+
+
+@app.get("/api/dashboard/devs/{user_id}")
+def dashboard_developer_as(user_id: int, batch_id: Optional[int] = None,
+                           db: Session = Depends(get_db), _: User = Depends(admin_only)):
+    """One developer's screen, exactly as they see it. Manager only."""
+    person = db.get(User, user_id)
+    if person is None:
+        raise HTTPException(404, "No such person.")
+    return dashboard.for_developer(db, person, dashboard.pick_batch(db, batch_id))
+
+
+# --------------------------------------------------------------------------- #
+# Interviews — the first thing here that records an outcome
+# --------------------------------------------------------------------------- #
+
+def _clash(db: Session, profile: Profile, when: dt.datetime, minutes: int,
+           ignore: Optional[int] = None) -> Optional[dict]:
+    """Whether the developer behind this profile is already busy then.
+
+    Checked across every identity the same developer is sold under, not just
+    this one. Two profiles are two candidates as far as a client is concerned,
+    but they are one person's Tuesday afternoon, and that is exactly where a
+    double-booking hides. A profile with nobody behind it is checked only
+    against itself.
+
+    Reported, never refused. Back-to-back rounds with the same client are
+    normal, a rescheduled interview legitimately overlaps the slot it is
+    moving out of, and an app that argues with the person who was on the call
+    gets worked around rather than fixed.
+    """
+    ids = [profile.id]
+    if profile.dev_user_id is not None:
+        shared = [row for (row,) in db.execute(
+            select(Profile.id).where(Profile.dev_user_id == profile.dev_user_id,
+                                     Profile.is_active == True)).all()]  # noqa: E712
+        ids = shared or ids
+    ends = when + dt.timedelta(minutes=max(1, minutes))
+
+    query = select(Interview).where(Interview.profile_id.in_(ids),
+                                    Interview.status == "scheduled",
+                                    Interview.scheduled_at < ends)
+    if ignore is not None:
+        query = query.where(Interview.id != ignore)
+    for other in db.scalars(query.order_by(Interview.scheduled_at)):
+        finish = other.scheduled_at + dt.timedelta(
+            minutes=max(1, other.duration_minutes or 30))
+        if finish > when:
+            names = {p.id: p.name for p in db.scalars(
+                select(Profile).where(Profile.id == other.profile_id))}
+            return {"id": other.id, "profile": names.get(other.profile_id, "?"),
+                    "client": other.client, "when": working_label(other.scheduled_at)}
+    return None
+
+
+def _when(text: str) -> dt.datetime:
+    try:
+        return from_working(text)
+    except ValueError:
+        raise HTTPException(400, "That is not a date and time this app can read. "
+                                 "Use the picker, or 2026-08-24T14:30.")
+
+
+def _interview_json(db: Session, row: Interview) -> dict:
+    return interviews.decorate(db, [row])[0]
+
+
+@app.get("/api/interviews")
+def list_interviews(profile_id: Optional[int] = None, db: Session = Depends(get_db),
+                    user: User = Depends(current_user)):
+    """Today, what is coming, what just happened — for whoever is asking.
+
+    Not behind the dashboard switch. That switch is about being *measured*;
+    this is a calendar, and hiding somebody's calendar from them only means
+    they miss the call.
+    """
+    if profile_id is not None:
+        linked_profile(profile_id, db, user)
+        ids: Optional[list[int]] = [profile_id]
+    else:
+        ids = visible_profile_ids(db, user)
+    rows = interviews.decorate(db, interviews.load(db, ids))
+    return {"rows": rows, "counts": interviews.counts(rows),
+            "funnel": interviews.funnel(db, ids), **interviews.split(rows)}
+
+
+@app.post("/api/interviews", status_code=201)
+def create_interview(body: InterviewIn, db: Session = Depends(get_db),
+                     user: User = Depends(current_user)):
+    """Log a reply that turned into a conversation.
+
+    Usually the BD, who runs the account the client answered. Sometimes the
+    developer, who was the one emailed. Both may, because both find out first
+    about half the time, and the one who knows should not have to ask somebody
+    else to type it in.
+    """
+    profile = linked_profile(body.profile_id, db, user)
+    when = _when(body.scheduled_at)
+    if body.mode not in INTERVIEW_MODES:
+        raise HTTPException(400, f"Mode must be one of {', '.join(INTERVIEW_MODES)}.")
+    if body.job_id is not None and not db.get(Job, body.job_id):
+        raise HTTPException(400, "No such job to attach it to.")
+
+    minutes = min(600, max(5, body.duration_minutes or 30))
+    clash = _clash(db, profile, when, minutes)
+
+    row = Interview(profile_id=profile.id, job_id=body.job_id,
+                    client=body.client.strip()[:300], role=body.role.strip()[:300],
+                    scheduled_at=when, duration_minutes=minutes, mode=body.mode,
+                    link=_check_link(body.link, "meeting link"),
+                    notes=body.notes.strip(), created_by=user.id)
+    db.add(row)
+    db.commit()
+    return {**_interview_json(db, row), "clash": clash}
+
+
+@app.patch("/api/interviews/{interview_id}")
+def update_interview(interview_id: int, body: InterviewPatch,
+                     db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Move it, or say how it went."""
+    row = db.get(Interview, interview_id)
+    if not row:
+        raise HTTPException(404, "No such interview.")
+    profile = linked_profile(row.profile_id, db, user)
+
+    clash = None
+    if body.scheduled_at is not None:
+        row.scheduled_at = _when(body.scheduled_at)
+    if body.duration_minutes is not None:
+        row.duration_minutes = min(600, max(5, body.duration_minutes))
+    if body.scheduled_at is not None or body.duration_minutes is not None:
+        clash = _clash(db, profile, row.scheduled_at, row.duration_minutes,
+                       ignore=row.id)
+    if body.client is not None:
+        row.client = body.client.strip()[:300]
+    if body.role is not None:
+        row.role = body.role.strip()[:300]
+    if body.mode is not None:
+        if body.mode not in INTERVIEW_MODES:
+            raise HTTPException(400, f"Mode must be one of {', '.join(INTERVIEW_MODES)}.")
+        row.mode = body.mode
+    if body.link is not None:
+        row.link = _check_link(body.link, "meeting link")
+    if body.notes is not None:
+        row.notes = body.notes.strip()
+    if body.status is not None:
+        if body.status not in INTERVIEW_STATUSES:
+            raise HTTPException(400, f"Status must be one of {', '.join(INTERVIEW_STATUSES)}.")
+        row.status = body.status
+    if body.outcome is not None:
+        if body.outcome not in INTERVIEW_OUTCOMES:
+            raise HTTPException(400, f"Outcome must be one of {', '.join(INTERVIEW_OUTCOMES)}.")
+        row.outcome = body.outcome
+        # Nobody records how an interview went before it happens. Saying it was
+        # a rejection while the row still reads "scheduled" would leave it on
+        # somebody's list of things to turn up to, and in the count of
+        # interviews nobody has reported back on.
+        if body.outcome != "pending" and row.status == "scheduled":
+            row.status = "done"
+    db.commit()
+    return {**_interview_json(db, row), "clash": clash}
+
+
+@app.delete("/api/interviews/{interview_id}")
+def delete_interview(interview_id: int, db: Session = Depends(get_db),
+                     user: User = Depends(current_user)):
+    """Remove one entered by mistake.
+
+    Cancelling is the usual thing and keeps the row, because a client who
+    pulled out is worth knowing about. This is for the interview that was never
+    real — so it is the manager's, or the person who typed it.
+    """
+    row = db.get(Interview, interview_id)
+    if not row:
+        raise HTTPException(404, "No such interview.")
+    linked_profile(row.profile_id, db, user)
+    if user.role != "admin" and row.created_by != user.id:
+        raise HTTPException(403, "Cancel it instead, or ask whoever logged it to remove it.")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- #

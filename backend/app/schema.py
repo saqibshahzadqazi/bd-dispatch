@@ -10,6 +10,11 @@ old `applications` table carries UNIQUE(job_id, user_id), which forbids exactly
 the case v2 exists to support — one person's two profiles both applying to the
 same job. So the affected tables are rebuilt rather than altered.
 
+Version 2.2 added the developer behind a profile, and interviews. Both are
+purely additive: `interviews` is a new table create_all makes on its own, and
+the profile columns go on below with LATER_COLUMNS. Nothing is rebuilt and
+nothing is lost, so upgrading to it is only ever a restart.
+
 Everything below is idempotent. A brand new database skips it entirely.
 """
 from __future__ import annotations
@@ -36,6 +41,20 @@ LATER_COLUMNS = {
     # fills the existing rows, so profiles that predate the team board are on it.
     "profiles": [
         ("share_progress", "BOOLEAN DEFAULT TRUE"),
+        # v2.2 — the developer behind the identity, and what a client is handed
+        # when it applies. Every one is optional and empty by default, so a
+        # workspace that upgrades and never fills any of them in behaves
+        # exactly as it did: the screens show nothing rather than something
+        # wrong. Empty strings rather than NULLs so the app never has to ask
+        # which kind of nothing it is looking at.
+        ("dev_user_id", "INTEGER"),
+        ("email", "VARCHAR(255) DEFAULT ''"),
+        ("resume_url", "TEXT DEFAULT ''"),
+        ("skills", "VARCHAR(400) DEFAULT ''"),
+        ("timezone", "VARCHAR(64) DEFAULT ''"),
+        ("rate", "VARCHAR(40) DEFAULT ''"),
+        ("availability", "VARCHAR(16) DEFAULT 'open'"),
+        ("bio", "TEXT DEFAULT ''"),
     ],
     # FALSE, so an upgrade does not hand every existing person a dashboard
     # nobody chose to open. The manager turns them on one at a time.

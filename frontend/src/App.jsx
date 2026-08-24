@@ -4,6 +4,8 @@ import Login from "./views/Login.jsx";
 import BdHome from "./views/BdHome.jsx";
 import AdminHome from "./views/AdminHome.jsx";
 import Dashboard from "./views/Dashboard.jsx";
+import DevHome from "./views/DevHome.jsx";
+import DevProfiles from "./views/DevProfiles.jsx";
 import ManagerDashboard from "./views/ManagerDashboard.jsx";
 import People from "./views/People.jsx";
 
@@ -34,7 +36,7 @@ export default function App() {
     api.me()
       .then((me) => {
         setUser(me);
-        if (!me.dashboard_visible) setView("work");
+        if (me.role === "bd" && !me.dashboard_visible) setView("work");
       })
       .catch(() => setToken(""))
       .finally(() => setBooting(false));
@@ -45,13 +47,16 @@ export default function App() {
   }
 
   if (!user) {
+    // A developer always lands on their desk: their dashboard is a calendar,
+    // not a set of figures somebody has to decide to show them.
     return <Login onSignedIn={(me) => {
       setUser(me);
-      setView(me.dashboard_visible ? "dashboard" : "work");
+      setView(me.role === "bd" && !me.dashboard_visible ? "work" : "dashboard");
     }} />;
   }
 
   const isAdmin = user.role === "admin";
+  const isDev = user.role === "dev";
 
   return (
     <>
@@ -60,12 +65,17 @@ export default function App() {
         <nav className="tabs">
           {/* No tab for a dashboard this person has not been given. The server
               refuses the request too — this only saves them the dead end. */}
-          {user.dashboard_visible && (
+          {(isDev || user.dashboard_visible) && (
             <button className="tab" aria-current={view === "dashboard"}
-                    onClick={() => setView("dashboard")}>DASHBOARD</button>
+                    onClick={() => setView("dashboard")}>{isDev ? "MY DESK" : "DASHBOARD"}</button>
           )}
-          <button className="tab" aria-current={view === "work"}
-                  onClick={() => setView("work")}>{isAdmin ? "BATCHES" : "MY WORK"}</button>
+          {isDev ? (
+            <button className="tab" aria-current={view === "details"}
+                    onClick={() => setView("details")}>MY DETAILS</button>
+          ) : (
+            <button className="tab" aria-current={view === "work"}
+                    onClick={() => setView("work")}>{isAdmin ? "BATCHES" : "MY WORK"}</button>
+          )}
           {isAdmin && (
             <button className="tab" aria-current={view === "people"}
                     onClick={() => setView("people")}>PEOPLE</button>
@@ -73,7 +83,7 @@ export default function App() {
         </nav>
         <span className="spacer" />
         <span className="muted">
-          {user.name} · {isAdmin ? "manager" : "business development"}
+          {user.name} · {isAdmin ? "manager" : isDev ? "developer" : "business development"}
         </span>
         <button className="link" onClick={signOut}>Sign out</button>
       </header>
@@ -83,6 +93,10 @@ export default function App() {
           view === "people" ? <People />
             : view === "work" ? <AdminHome />
               : <ManagerDashboard onOpenBatches={() => setView("work")} />
+        ) : isDev ? (
+          view === "details"
+            ? <DevProfiles />
+            : <DevHome onOpenProfiles={() => setView("details")} />
         ) : (
           view === "dashboard" && user.dashboard_visible
             ? <Dashboard onOpenWork={() => setView("work")} />

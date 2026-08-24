@@ -8,11 +8,16 @@ same skills, run by two different people, each handing in what they applied to.
 Ali runs Khuram and logs 30 jobs; Sara runs Zahid and logs 50. Ten of those are
 the same posting found twice. Run the cycle and Khuram gets back the 40 jobs it
 has never seen, Zahid the 20 it has never seen.
+
+Each profile also gets the developer it actually sells, and a diary with an
+interview in it today — otherwise the developer half of the app seeds into an
+empty screen and there is nothing to look at.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import os
 import random
 from pathlib import Path
@@ -20,7 +25,8 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.main import SessionLocal, engine, hash_password
-from app.models import Base, Profile, User
+from app.models import (Base, Interview, Profile, User, from_working,
+                        working_today)
 
 TEAM = [
     ("ali@example.com", "Ali Raza"),
@@ -28,11 +34,45 @@ TEAM = [
     ("hina@example.com", "Hina Malik"),
 ]
 
-# name -> (headline, platform, whose account runs it)
+# The people the profiles actually sell. They sign in, see their own diary and
+# keep their own resume current, and never touch a list of jobs.
+DEVELOPERS = [
+    ("khuram.dev@example.com", "Khuram Gill"),
+    ("zahid.dev@example.com", "Zahid Iqbal"),
+    ("nadia.dev@example.com", "Nadia Sheikh"),
+]
+
+# The identity a client sees, the BD who applies as it, and the developer
+# behind it. Khuram and Zahid are two different people with the same skills —
+# which is the whole reason this product exists.
 PROFILES = [
-    ("Khuram", "AI Engineer", "Upwork", "ali@example.com"),
-    ("Zahid", "AI Engineer", "Upwork", "sara@example.com"),
-    ("Nadia", "Full Stack Engineer", "Upwork", "hina@example.com"),
+    {"name": "Khuram", "headline": "AI Engineer", "platform": "Upwork",
+     "bd": "ali@example.com", "dev": "khuram.dev@example.com",
+     "email": "khuram.gill@example.com",
+     "resume_url": "https://example.com/resumes/khuram-gill.pdf",
+     "skills": "Python, LLMs, RAG, LangChain, AWS, Postgres",
+     "timezone": "PKT · overlaps New York 6pm-2am",
+     "rate": "$45-60/hr", "availability": "open",
+     "bio": "Six years on production ML. Shipped two RAG systems and a fine-tuned "
+            "classifier now serving 40k requests a day."},
+    {"name": "Zahid", "headline": "AI Engineer", "platform": "Upwork",
+     "bd": "sara@example.com", "dev": "zahid.dev@example.com",
+     "email": "zahid.iqbal@example.com",
+     "resume_url": "https://example.com/resumes/zahid-iqbal.pdf",
+     "skills": "Python, PyTorch, Computer Vision, MLOps, GCP",
+     "timezone": "PKT · overlaps New York 7pm-1am",
+     "rate": "$50-65/hr", "availability": "limited",
+     "bio": "Vision and MLOps. Took a detection model from notebook to a "
+            "monitored service on GKE."},
+    {"name": "Nadia", "headline": "Full Stack Engineer", "platform": "Upwork",
+     "bd": "hina@example.com", "dev": "nadia.dev@example.com",
+     "email": "nadia.sheikh@example.com",
+     "resume_url": "https://example.com/resumes/nadia-sheikh.pdf",
+     "skills": "React, Django, Postgres, Docker, Stripe",
+     "timezone": "PKT · overlaps New York 5pm-11pm",
+     "rate": "$40-55/hr", "availability": "booked",
+     "bio": "Full stack, product-side. Comfortable owning a feature from the "
+            "schema to the button."},
 ]
 
 CLIENTS = [
@@ -77,15 +117,41 @@ def seed_accounts() -> None:
             db.add(User(email=email, name=name,
                         password_hash=hash_password("bdpass12345"), role="bd"))
             created.append(f"{email} / bdpass12345   {name}")
+    for email, name in DEVELOPERS:
+        if not db.scalar(select(User).where(User.email == email)):
+            db.add(User(email=email, name=name,
+                        password_hash=hash_password("devpass12345"), role="dev"))
+            created.append(f"{email} / devpass12345  {name} (developer)")
     db.commit()
 
     owners = {u.email: u.id for u in db.scalars(select(User)).all()}
-    for name, headline, platform, email in PROFILES:
-        if not db.scalar(select(Profile).where(Profile.name == name)):
-            db.add(Profile(name=name, headline=headline, platform=platform,
-                           user_id=owners.get(email)))
-            created.append(f"profile {name} ({headline}) run by {email}")
+    for spec in PROFILES:
+        profile = db.scalar(select(Profile).where(Profile.name == spec["name"]))
+        if profile is None:
+            db.add(Profile(name=spec["name"], headline=spec["headline"],
+                           platform=spec["platform"],
+                           user_id=owners.get(spec["bd"]),
+                           dev_user_id=owners.get(spec["dev"]),
+                           email=spec["email"], resume_url=spec["resume_url"],
+                           skills=spec["skills"], timezone=spec["timezone"],
+                           rate=spec["rate"], availability=spec["availability"],
+                           bio=spec["bio"]))
+            created.append(f"profile {spec['name']} ({spec['headline']}) — "
+                           f"{spec['bd']} applies as it, {spec['dev']} is it")
+        elif profile.dev_user_id is None:
+            # A workspace seeded before developers existed. Attach one rather
+            # than leaving a profile nobody is behind.
+            profile.dev_user_id = owners.get(spec["dev"])
+            profile.email = profile.email or spec["email"]
+            profile.resume_url = profile.resume_url or spec["resume_url"]
+            profile.skills = profile.skills or spec["skills"]
+            profile.timezone = profile.timezone or spec["timezone"]
+            profile.rate = profile.rate or spec["rate"]
+            profile.bio = profile.bio or spec["bio"]
+            created.append(f"profile {spec['name']} now has {spec['dev']} behind it")
     db.commit()
+
+    created += seed_interviews(db)
     db.close()
 
     print("Accounts and profiles ready.")
@@ -93,6 +159,60 @@ def seed_accounts() -> None:
         print("  ", line)
     if not created:
         print("   (everything already existed)")
+
+
+def seed_interviews(db) -> list[str]:
+    """A diary with something in it today.
+
+    Written relative to today rather than to fixed dates, so the developer
+    screens have an interview on them whenever the seed is run rather than
+    only during the week somebody wrote this file. Skipped entirely once a
+    single interview exists, so re-running never doubles anybody up.
+    """
+    if db.scalar(select(Interview).limit(1)):
+        return []
+
+    profiles = {p.name: p for p in db.scalars(select(Profile)).all()}
+    today = working_today()
+
+    def at(days: int, clock: str):
+        day = today + dt.timedelta(days=days)
+        return from_working(f"{day.isoformat()}T{clock}")
+
+    #        profile,  days, clock,  client, role, mode, status, outcome
+    plan = [
+        ("Khuram", 0, "15:00", "Northwind Digital", "RAG Pipeline Developer",
+         "video", "scheduled", "pending", 45),
+        ("Zahid", 0, "17:30", "Sable Analytics", "Computer Vision Engineer",
+         "call", "scheduled", "pending", 30),
+        ("Khuram", 2, "14:00", "Verdant Labs", "LLM Fine-tuning Engineer",
+         "video", "scheduled", "pending", 60),
+        ("Nadia", 3, "16:00", "Orchard Retail Pvt Ltd", "Senior React Developer",
+         "video", "scheduled", "pending", 45),
+        # Yesterday, still unreported — this is what puts the nag on the screens.
+        ("Nadia", -1, "15:30", "Harbourstone LLC", "Django Backend Developer",
+         "video", "scheduled", "pending", 30),
+        ("Nadia", -4, "17:00", "Copperline Media", "Full Stack Engineer",
+         "video", "done", "offer", 45),
+        ("Khuram", -6, "16:00", "Larkspur Data", "Document AI / OCR Specialist",
+         "video", "done", "passed", 30),
+        ("Zahid", -9, "18:00", "Talloak Systems", "ML Ops Engineer - AWS",
+         "video", "done", "rejected", 45),
+    ]
+
+    made = 0
+    for name, days, clock, client, role, mode, status, outcome, minutes in plan:
+        profile = profiles.get(name)
+        if profile is None:
+            continue
+        db.add(Interview(profile_id=profile.id, client=client, role=role,
+                         scheduled_at=at(days, clock), duration_minutes=minutes,
+                         mode=mode, status=status, outcome=outcome,
+                         link="https://meet.example.com/" + name.lower(),
+                         notes="Wants to hear about the last thing you shipped."))
+        made += 1
+    db.commit()
+    return [f"{made} sample interviews, two of them today"] if made else []
 
 
 def make_samples(folder: str = "sample_sheets") -> None:

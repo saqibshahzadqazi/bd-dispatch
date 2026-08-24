@@ -88,6 +88,7 @@ export const api = {
   deactivateUser: (id) => request(`/users/${id}`, { method: "DELETE" }),
 
   listProfiles: () => request("/profiles"),
+  getProfile: (id) => request(`/profiles/${id}`),
   createProfile: (payload) => request("/profiles", { method: "POST", body: payload }),
   updateProfile: (id, payload) => request(`/profiles/${id}`, { method: "PATCH", body: payload }),
   retireProfile: (id) => request(`/profiles/${id}`, { method: "DELETE" }),
@@ -130,6 +131,21 @@ export const api = {
     request(`/dashboard/profiles/${profileId}${query(batchId)}`),
 
   mySheets: (batchId) => request(`/batches/${batchId}/my-sheets`),
+
+  // Interviews. Scoped on the server from the token: a BD sees the profiles
+  // they run, a developer the ones they are sold under, a manager everything.
+  // Times go up and come back on the team's clock — see models.from_working.
+  interviews: (profileId) =>
+    request(`/interviews${profileId ? `?profile_id=${profileId}` : ""}`),
+  createInterview: (payload) => request("/interviews", { method: "POST", body: payload }),
+  updateInterview: (id, payload) =>
+    request(`/interviews/${id}`, { method: "PATCH", body: payload }),
+  deleteInterview: (id) => request(`/interviews/${id}`, { method: "DELETE" }),
+
+  // A developer's own screen, and a manager looking at one.
+  devDashboard: (batchId) => request(`/dashboard/dev${query(batchId)}`),
+  developerDashboard: (userId, batchId) =>
+    request(`/dashboard/devs/${userId}${query(batchId)}`),
   setStatus: (assignmentId, status) =>
     request(`/assignments/${assignmentId}`, { method: "PATCH", body: { status } }),
 };

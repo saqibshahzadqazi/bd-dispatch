@@ -41,6 +41,22 @@ COVER = "cover"      # everyone gets every job they have not worked
 SPLIT = "split"      # one job goes to exactly one profile
 MODES = (COVER, SPLIT)
 
+# Who signs in, and what the app is for them. A manager runs cycles; a BD works
+# profiles; a developer is the person those profiles actually sell — they sit
+# the interview and do the work, and the only screen they need is their own.
+ROLES = ("admin", "bd", "dev")
+
+# What a developer's calendar looks like. A BD reads this before applying under
+# a profile: there is no point winning an interview for somebody who cannot
+# take the work.
+AVAILABILITY = ("open", "limited", "booked")
+
+INTERVIEW_MODES = ("video", "call", "onsite", "async")
+INTERVIEW_STATUSES = ("scheduled", "done", "cancelled", "no_show")
+# `passed` is a round cleared, not the end of it. Both `offer` and `hired`
+# count as an offer; only `hired` counts as work actually won.
+INTERVIEW_OUTCOMES = ("pending", "passed", "offer", "hired", "rejected")
+
 
 # The team works to Eastern time, so that is what "applied on" means. Stored
 # timestamps stay UTC; this is only for the stamp a person reads. Change it here
@@ -64,6 +80,74 @@ def applied_stamp() -> str:
     except Exception:
         now = dt.datetime.now()
     return now.strftime("%Y-%m-%d %H:%M")
+
+
+def working_zone():
+    """The team's timezone, or None on a machine with no timezone database.
+
+    ZoneInfo needs the tzdata package on Windows. A missing one should cost a
+    cosmetic hour, not take the app down, so every caller here has a fallback.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(WORKING_TIMEZONE)
+    except Exception:
+        return None
+
+
+def to_working(value: dt.datetime) -> dt.datetime:
+    """A stored timestamp as the wall clock where the team works.
+
+    Everything is stored UTC and SQLite hands it back with no marker at all, so
+    the marker goes on here — otherwise it reads as local time and a nine
+    o'clock interview turns up in the middle of the night.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    zone = working_zone()
+    return value.astimezone(zone) if zone else value.astimezone()
+
+
+def working_today() -> dt.date:
+    return to_working(dt.datetime.now(dt.timezone.utc)).date()
+
+
+def from_working(text: str) -> dt.datetime:
+    """A date and time typed on the team's clock, as UTC to store.
+
+    Interviews are agreed in Eastern time because that is the clock the clients
+    and the team both work to — see WORKING_TIMEZONE. So "14:30" typed into the
+    form means half past two in New York, wherever the person typing it is
+    sitting. A string that carries its own offset is believed instead, which is
+    what makes the field safe to round-trip through an edit form.
+    """
+    raw = (text or "").strip().replace(" ", "T")
+    if not raw:
+        raise ValueError("Give the interview a date and a time.")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    stamp = dt.datetime.fromisoformat(raw)
+    if stamp.tzinfo is None:
+        zone = working_zone()
+        stamp = stamp.replace(tzinfo=zone) if zone else stamp.astimezone()
+    return stamp.astimezone(dt.timezone.utc).replace(tzinfo=None)
+
+
+def working_label(value: dt.datetime) -> dict:
+    """Every form of one timestamp the browser needs, worked out on the server.
+
+    The app is anchored to one timezone, so the browser must not be the thing
+    that decides what "half past two" means — a BD in Karachi and a developer
+    in Lisbon have to read one interview as the same moment. `input` is the
+    format an <input type="datetime-local"> wants handed back to it.
+    """
+    local = to_working(value)
+    stamp = value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+    return {"iso": stamp.isoformat(),
+            "day": local.date().isoformat(),
+            "time": local.strftime("%H:%M"),
+            "label": local.strftime("%a %d %b · %H:%M"),
+            "input": local.strftime("%Y-%m-%dT%H:%M")}
 
 
 class User(Base):
@@ -90,6 +174,18 @@ class Profile(Base):
     it — "AI Engineer". Two profiles with the same headline are exactly the
     case this system is built for: same skills, different candidates, both
     free to approach the same job.
+
+    Two people stand behind a profile and they are not the same person.
+    `user_id` is the BD who runs the account and does the typing. `dev_user_id`
+    is the developer the profile actually sells — the one who sits the
+    interview and writes the code. Either may be empty: an identity can exist
+    before anybody is behind it, and a developer can be attached later.
+
+    The contact fields — email, resume, skills, rate, timezone — describe the
+    developer but live here rather than on their account, because what a client
+    is handed is the profile. One developer running two identities may well
+    send two different resumes into two different markets, and hanging these
+    off the person would force those two to be one.
     """
     __tablename__ = "profiles"
     id = Column(Integer, primary_key=True)
@@ -102,6 +198,19 @@ class Profile(Base):
     # board as a whole is gated by a workspace switch the manager holds; this
     # takes one profile off it without hiding everybody.
     share_progress = Column(Boolean, nullable=False, default=True)
+
+    # The developer behind the identity, and what a client is handed when it
+    # applies. All optional — a profile behaves exactly as it did before
+    # without any of it, and the screens simply have nothing to show.
+    dev_user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    email = Column(String(255), nullable=False, default="")
+    resume_url = Column(Text, nullable=False, default="")
+    skills = Column(String(400), nullable=False, default="")
+    timezone = Column(String(64), nullable=False, default="")
+    rate = Column(String(40), nullable=False, default="")
+    availability = Column(String(16), nullable=False, default="open")
+    bio = Column(Text, nullable=False, default="")
+
     created_at = Column(DateTime, default=utcnow)
 
 
@@ -234,4 +343,51 @@ class Assignment(Base):
               unique=True,
               sqlite_where=Column("exclusive") == True,          # noqa: E712
               postgresql_where=Column("exclusive") == True),     # noqa: E712
+    )
+
+
+class Interview(Base):
+    """A client wanting to talk to whoever is behind a profile.
+
+    This is the first table in the system that records an *outcome*. Everything
+    before it counts effort — rows typed, jobs dispatched, duplication avoided —
+    and a team can improve every one of those figures without winning a single
+    piece of work. An interview is the first thing that says the applications
+    landed, and an outcome on it is the first thing that says they were worth
+    sending.
+
+    It hangs off the profile, not the developer, for the same reason everything
+    else does: the client is talking to "Khuram, AI Engineer". Who that is, and
+    whose calendar it lands in, is `profiles.dev_user_id` and may change.
+
+    `job_id` is set when the interview came from a posting the system already
+    knows about and left empty when it did not — plenty of replies arrive weeks
+    later, or through a channel the sheets never saw. `client` and `role` are
+    kept on the row either way, so a purged job cannot leave an interview
+    describing nothing.
+    """
+    __tablename__ = "interviews"
+    id = Column(Integer, primary_key=True)
+    profile_id = Column(Integer, ForeignKey("profiles.id", ondelete="CASCADE"),
+                        nullable=False, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=True, index=True)
+    client = Column(String(300), nullable=False, default="")
+    role = Column(String(300), nullable=False, default="")
+    # UTC, like every other stored timestamp. What the team typed was Eastern;
+    # from_working() did the conversion and working_label() undoes it.
+    scheduled_at = Column(DateTime, nullable=False, index=True)
+    duration_minutes = Column(Integer, nullable=False, default=30)
+    mode = Column(String(16), nullable=False, default="video")
+    link = Column(Text, nullable=False, default="")
+    status = Column(String(16), nullable=False, default="scheduled")
+    outcome = Column(String(16), nullable=False, default="pending")
+    notes = Column(Text, nullable=False, default="")
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        # Every screen asks the same question — what is next for this profile —
+        # so the index answers it in the order the screens want it.
+        Index("ix_interview_profile_time", "profile_id", "scheduled_at"),
     )

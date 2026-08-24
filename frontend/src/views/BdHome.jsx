@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, download, safeUrl } from "../api.js";
 import EntryTable from "./EntryTable.jsx";
+import Interviews from "./Interviews.jsx";
+import { Availability, CopyButton, Skills } from "./widgets.jsx";
 
 const FIELD_LABELS = {
   url: "Job link",
@@ -20,7 +22,8 @@ export default function BdHome() {
   const [note, setNote] = useState(null);
   const [busy, setBusy] = useState(false);
   const [hot, setHot] = useState(false);
-  const [tab, setTab] = useState("applied");   // applied | new
+  const [tab, setTab] = useState("applied");   // applied | new | interviews
+  const [diary, setDiary] = useState(null);   // interview counts, for the badge
   const [how, setHow] = useState("type");      // type | upload
   const fileInput = useRef(null);
 
@@ -74,6 +77,16 @@ export default function BdHome() {
   }, [batchId]);
 
   useEffect(() => { loadSheets(); }, [loadSheets]);
+
+  // Somebody else may put an interview in this diary at any moment — the
+  // developer themselves, or a colleague who took the call. The badge is the
+  // only thing on this screen that has to be right within the hour.
+  useEffect(() => {
+    const pull = () => api.interviews().then((d) => setDiary(d.counts)).catch(() => {});
+    pull();
+    const tick = setInterval(pull, 60000);
+    return () => clearInterval(tick);
+  }, []);
 
   // The server rebuilds these lists on a timer, so what is on screen goes stale
   // on its own. Pick up the new one rather than waiting for a reload.
@@ -180,6 +193,87 @@ export default function BdHome() {
         </div>
       )}
 
+      {/* What the client is actually being handed. The resume link is the thing
+          a BD needs three seconds before they need anything else on this page. */}
+      {profile && (
+        <section className="card pad stack" style={{ gap: 10 }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div>
+              <h3>Who you are applying as</h3>
+              <p className="muted" style={{ marginTop: 3, maxWidth: 680 }}>
+                {profile.developer
+                  ? <>Behind <b>{profile.name}</b> is <b>{profile.developer}</b>. They sit the
+                      interview, so anything you book lands on their screen.</>
+                  : <>Nobody is attached to <b>{profile.name}</b> yet, so an interview booked
+                      against it reaches no one. Ask your manager to say who is behind it.</>}
+              </p>
+            </div>
+            {profile.developer && <Availability value={profile.availability} />}
+          </div>
+
+          <div className="row" style={{ gap: 20 }}>
+            <span className="row" style={{ gap: 7 }}>
+              <span className="muted">email</span>
+              <span className="mono" style={{ fontSize: 12 }}>{profile.email || "—"}</span>
+              <CopyButton value={profile.email} />
+            </span>
+            <span className="row" style={{ gap: 7 }}>
+              <span className="muted">resume</span>
+              {safeUrl(profile.resume_url) ? (
+                <>
+                  <a href={safeUrl(profile.resume_url)} target="_blank" rel="noreferrer noopener">open</a>
+                  <CopyButton value={profile.resume_url} label="copy link" />
+                </>
+              ) : (
+                <span style={{ color: "var(--brick)", fontSize: 12 }}>
+                  not set{profile.developer ? ` — ${profile.developer} adds it on their own screen` : ""}
+                </span>
+              )}
+            </span>
+            {profile.rate && (
+              <span className="row" style={{ gap: 7 }}>
+                <span className="muted">rate</span>
+                <span style={{ fontSize: 12 }}>{profile.rate}</span>
+              </span>
+            )}
+            {profile.timezone && (
+              <span className="row" style={{ gap: 7 }}>
+                <span className="muted">hours</span>
+                <span style={{ fontSize: 12 }}>{profile.timezone}</span>
+              </span>
+            )}
+          </div>
+
+          {profile.skills && <Skills value={profile.skills} />}
+          {profile.bio && <p className="muted" style={{ maxWidth: 760 }}>{profile.bio}</p>}
+
+          {profile.availability === "booked" && (
+            <div className="notice">
+              <b>{profile.developer || profile.name} is booked up.</b> Applying under this
+              profile now wins interviews nobody can sit. Worth checking before you send more.
+            </div>
+          )}
+        </section>
+      )}
+
+      {diary?.today > 0 && (
+        <div className="notice gate">
+          <b>{diary.today} interview{diary.today === 1 ? "" : "s"} today</b> against the profiles
+          you run.{" "}
+          <button className="link" onClick={() => setTab("interviews")}>Open the diary</button>
+        </div>
+      )}
+
+      {diary?.awaiting_outcome > 0 && (
+        <div className="notice">
+          <b>{diary.awaiting_outcome} interview
+          {diary.awaiting_outcome === 1 ? " has" : "s have"} happened with no outcome recorded.</b>{" "}
+          Until somebody says how they went, nothing here can tell you whether the applications
+          are working.{" "}
+          <button className="link" onClick={() => setTab("interviews")}>Record them</button>
+        </div>
+      )}
+
       {note && <div className={note.bad ? "notice" : "notice ok"}>{note.text}</div>}
       {!batches.length && <div className="notice">No cycle is open yet. Your manager needs to start one.</div>}
 
@@ -194,7 +288,22 @@ export default function BdHome() {
             <button className={tab === "new" ? "" : "ghost"} onClick={() => setTab("new")}>
               New jobs for {profile?.name}{sheet.length ? ` (${sheet.length})` : ""}
             </button>
+            <button className={tab === "interviews" ? "" : "ghost"} onClick={() => setTab("interviews")}>
+              Interviews{diary?.today ? ` (${diary.today} today)`
+                : diary?.scheduled ? ` (${diary.scheduled})` : ""}
+            </button>
           </div>
+
+          {tab === "interviews" && (
+            <Interviews
+              profiles={profiles}
+              heading="Interviews"
+              intro="Every reply that turned into a conversation, for the profiles you run. Logging
+                     one puts it on the developer's screen — nothing is emailed, and nobody has to
+                     be told."
+              showFunnel
+            />
+          )}
 
           {tab === "applied" && (
             <section className="stack" style={{ gap: 10 }}>

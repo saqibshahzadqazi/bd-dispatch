@@ -31,8 +31,9 @@ from typing import Optional, Sequence
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import (WORKING_TIMEZONE, Application, Assignment, Batch,
-                     BatchApplication, Job, Profile, Upload, User)
+from . import interviews
+from .models import (Application, Assignment, Batch, BatchApplication, Job,
+                     Profile, Upload, User, to_working, working_today)
 
 ACTIVITY_DAYS = 14        # the strip on a BD's own dashboard
 ORG_ACTIVITY_DAYS = 30    # the manager sees further back
@@ -53,23 +54,14 @@ def _pct(part: int, whole: int) -> int:
 def _working_day(value: Optional[dt.datetime]) -> Optional[dt.date]:
     """The team's calendar day for a stored UTC timestamp.
 
-    Stored timestamps are UTC and SQLite hands them back without the marker, so
-    it goes on before the conversion. A machine with no timezone database falls
-    back to its own clock rather than taking the dashboard down over a chart.
+    models.to_working does the conversion — one implementation, so a chart and
+    an interview can never disagree about which day something happened on.
     """
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=dt.timezone.utc)
-    try:
-        from zoneinfo import ZoneInfo
-        return value.astimezone(ZoneInfo(WORKING_TIMEZONE)).date()
-    except Exception:
-        return value.astimezone().date()
+    return None if value is None else to_working(value).date()
 
 
 def _today() -> dt.date:
-    return _working_day(dt.datetime.now(dt.timezone.utc))
+    return working_today()
 
 
 def blank_stats() -> dict:
@@ -206,6 +198,11 @@ def profile_rows(db: Session, profiles: Sequence[Profile], batch_id: Optional[in
             "platform": profile.platform,
             "user_id": profile.user_id,
             "person": owners.get(profile.user_id),
+            # Who the client would actually be meeting, and whether they could
+            # take the work. Blank on a profile nobody has been attached to.
+            "dev_user_id": profile.dev_user_id,
+            "developer": owners.get(profile.dev_user_id),
+            "availability": profile.availability or "open",
             # A NULL here is a row that predates the column, and the default is
             # to share — so only an explicit False takes a profile off the board.
             "shared": profile.share_progress is not False,
@@ -334,9 +331,15 @@ def for_person(db: Session, user: User, batch: Optional[Batch],
     totals = _rollup(rows)
     totals["profiles"] = len(rows)
 
+    ids = [p.id for p in mine]
     return {"batch": _brief(batch), "batches": cycle_list(db),
             "profiles": rows, "totals": totals,
             "activity": series, "streak": streak(series),
+            # What the typing produced. Every other figure on this screen goes
+            # up when somebody works harder; these two only go up when the work
+            # was worth sending.
+            "interviews": interviews.summary(db, ids),
+            "funnel": interviews.funnel(db, ids),
             "team_visible": team_visible}
 
 
@@ -431,7 +434,12 @@ def overview(db: Session, batch: Optional[Batch]) -> dict:
     return {"batch": _brief(batch), "batches": cycle_list(db),
             "org": org, "profiles": rows, "people": people, "missing": missing,
             "activity": activity(db, None, days=ORG_ACTIVITY_DAYS),
-            "history": history(db)}
+            "history": history(db),
+            # The other half of the job. Everything above says how much was
+            # sent; this says what came back, and who is free to take it.
+            "interviews": interviews.summary(db),
+            "funnel": interviews.funnel(db),
+            "developers": interviews.developer_rows(db)}
 
 
 def profile_detail(db: Session, profile: Profile, batch: Optional[Batch]) -> dict:
@@ -478,7 +486,63 @@ def profile_detail(db: Session, profile: Profile, batch: Optional[Batch]) -> dic
         "profile": {"id": profile.id, "name": profile.name,
                     "headline": profile.headline, "platform": profile.platform,
                     "person": owners.get(profile.user_id),
-                    "shared": profile.share_progress is not False},
+                    "shared": profile.share_progress is not False,
+                    # The developer, and what a client is handed when this
+                    # identity applies.
+                    "dev_user_id": profile.dev_user_id,
+                    "developer": owners.get(profile.dev_user_id),
+                    "email": profile.email or "",
+                    "resume_url": profile.resume_url or "",
+                    "skills": profile.skills or "",
+                    "timezone": profile.timezone or "",
+                    "rate": profile.rate or "",
+                    "availability": profile.availability or "open",
+                    "bio": profile.bio or ""},
         "stats": stats, "activity": series, "streak": streak(series),
         "recent": recent, "cycles": per_cycle,
+        "interviews": interviews.summary(db, [profile.id]),
+        "funnel": interviews.funnel(db, [profile.id]),
     }
+
+
+def for_developer(db: Session, person: User, batch: Optional[Batch]) -> dict:
+    """A developer's own screen.
+
+    The mirror of for_person, and pointed the other way. A BD's dashboard asks
+    how much went out; a developer's asks what is coming back and when they
+    have to be somewhere. Same cycle figures underneath, because the developer
+    is entitled to know how hard their identities are being worked — but the
+    thing at the top of the screen is the next interview, not the row count.
+
+    Not gated by `dashboard_visible`. That switch is about being measured
+    without anybody deciding to measure you; this is a calendar and a resume,
+    and withholding it only means nobody turns up.
+    """
+    profiles = list(db.scalars(
+        select(Profile).where(Profile.is_active == True,  # noqa: E712
+                              Profile.dev_user_id == person.id)
+        .order_by(Profile.name)))
+    owners = {u.id: u.name for u in db.scalars(select(User))}
+
+    rows = profile_rows(db, profiles, batch.id if batch else None, owners)
+    # The contact details a BD pastes into an application, alongside the
+    # figures, because this is the screen where the developer keeps them right.
+    detail = {p.id: p for p in profiles}
+    for row in rows:
+        profile = detail[row["profile_id"]]
+        row.update({"email": profile.email or "",
+                    "resume_url": profile.resume_url or "",
+                    "skills": profile.skills or "",
+                    "timezone": profile.timezone or "",
+                    "rate": profile.rate or "",
+                    "bio": profile.bio or "",
+                    "platform": profile.platform or ""})
+
+    series = activity(db, [p.id for p in profiles], days=ORG_ACTIVITY_DAYS)
+    totals = _rollup(rows)
+    totals["profiles"] = len(rows)
+
+    return {"batch": _brief(batch), "batches": cycle_list(db),
+            "profiles": rows, "totals": totals,
+            "activity": series, "streak": streak(series),
+            **interviews.for_developer(db, person, profiles)}
