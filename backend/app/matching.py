@@ -143,6 +143,137 @@ def fuzzy_merge(records: Iterable[dict], threshold: int = 88,
     return remap
 
 
+# --------------------------------------------------------------------------- #
+# Who else should be in this cycle
+# --------------------------------------------------------------------------- #
+
+# Words that say what somebody is rather than what they can do. Stripped
+# before two skills are compared, for the same reason _SUFFIX strips "Ltd"
+# from a client name: they are on nearly every entry, so leaving them in means
+# "React Engineer" and "AI Engineer" score 84 on the word "engineer" alone and
+# a front-end profile gets pulled into an AI cycle.
+_ROLE_NOISE = re.compile(
+    r"\b(engineer|engineering|developer|dev|programmer|specialist|consultant|"
+    r"expert|professional|senior|junior|lead|principal|staff|sr|jr|mid|level|"
+    r"years|experience|freelance|freelancer|contractor|remote)\b"
+)
+
+
+def skill_set(value: object) -> set[str]:
+    """One profile's skills as comparable tokens.
+
+    Split on commas, slashes, pipes and semicolons, because a skills field is
+    typed by a person and "Python, PyTorch / RAG" is as common as any tidier
+    form. Each entry then goes through the same normaliser client names take,
+    plus the role words above.
+
+    An entry that is nothing but role words — a skills field reading
+    "Senior Developer" — comes out empty and is dropped rather than kept as a
+    token everybody would match on.
+    """
+    parts = re.split(r"[,/|;]+", str(value or ""))
+    out = set()
+    for part in parts:
+        token = _ROLE_NOISE.sub(" ", normalize_text(part))
+        token = re.sub(r"\s+", " ", token).strip()
+        # A bare number is what "5 years experience" leaves behind once the
+        # role words are gone, and two profiles both claiming five years would
+        # otherwise match on the digit alone.
+        if token and not token.isdigit():
+            out.add(token)
+    return out
+
+
+# Skills so widely shared that having one in common says nothing about whether
+# two profiles sell the same thing. Infrastructure and tooling, not languages:
+# an AI engineer and a front-end engineer both run Postgres in Docker on AWS,
+# and matching on that is how a full-stack profile ends up in an AI cycle.
+#
+# Deliberately excludes languages and frameworks. Two profiles both listing
+# Python, or both listing React, really are in the same market — that is the
+# Khuram-and-Zahid case this whole feature exists for.
+_COMMON_SKILLS = {
+    "git", "github", "gitlab", "docker", "kubernetes", "k8s", "aws", "azure",
+    "gcp", "google cloud", "cloud", "linux", "unix", "bash", "shell",
+    "sql", "postgres", "postgresql", "mysql", "sqlite", "mongodb", "mongo",
+    "redis", "nginx", "rest", "rest api", "api", "apis", "json", "xml",
+    "html", "css", "agile", "scrum", "jira", "ci", "cd", "ci cd", "devops",
+    "testing", "unit testing", "debugging", "communication", "english",
+}
+
+
+def _meaningful(skills: set[str]) -> set[str]:
+    """The skills that can carry a match on their own."""
+    return {skill for skill in skills
+            if skill not in _COMMON_SKILLS and skill.replace(" ", "") not in _COMMON_SKILLS}
+
+
+def _squashed(skills: set[str]) -> set[str]:
+    """The same skills with the spaces taken out.
+
+    normalize_text turns punctuation into spaces, so "Node.js" becomes the two
+    tokens "node js" while somebody else's "nodejs" stays one. Compared as
+    written those score 62 and never meet; squashed, they are the same string.
+    Cheaper and more exact than dropping the fuzzy threshold far enough to
+    catch them, which would start fusing genuinely different skills.
+    """
+    return {skill.replace(" ", "") for skill in skills}
+
+
+def skills_overlap(a: object, b: object, threshold: int = 82) -> bool:
+    """Whether two profiles are selling near enough the same thing.
+
+    Used to decide which profiles join a cycle they have not handed a sheet
+    into. Shared tooling is dropped first — see _COMMON_SKILLS — and then three
+    passes, cheapest first: the skills as written, the skills with punctuation
+    squashed out ("Node.js" against "nodejs"), then fuzzy, which is what catches
+    "LLM" against "LLMs" and "Postgres" against "PostgreSQL".
+
+    One shared skill is enough on purpose. Requiring a proportion of them to
+    match would punish a profile for listing its skills in detail, and the cost
+    of a loose match here is one extra job on a list somebody skips in a second
+    — against the cost of a tight one, which is the profile with spare capacity
+    being the only profile handed nothing.
+
+    88 was too tight to be useful on real skills fields and 82 is where "Java"
+    against "JavaScript" (57) and "React" against "Redux" (40) are still
+    comfortably apart. Raise it if you see unrelated profiles being pulled into
+    each other's cycles.
+    """
+    left, right = _meaningful(skill_set(a)), _meaningful(skill_set(b))
+    if not left or not right:
+        return False
+    if left & right or _squashed(left) & _squashed(right):
+        return True
+    return any(fuzz.token_set_ratio(one, two) >= threshold
+               for one in left for two in right)
+
+
+def similar_profiles(participants: Sequence[dict], others: Sequence[dict],
+                     threshold: int = 82) -> list[int]:
+    """Profiles that should receive this cycle's pool without having fed it.
+
+    A cycle opens, two BDs hand in their sheets, and a third profile selling
+    the same skills has logged nothing yet — because they are new, or were away,
+    or simply have not got to it. Leaving them out means the one person with
+    spare capacity is the one person given no work, which is exactly backwards.
+
+    Matched on skills rather than on the headline, so "AI Engineer" and "ML
+    Engineer" are recognised as the same market. A profile with no skills
+    recorded is never pulled in: an empty field is not a match, it is a profile
+    nobody has finished setting up, and handing it a stranger's pool would be a
+    guess rather than an inference.
+
+    Entries are {"id": int, "skills": str} on both sides.
+    """
+    out = []
+    for candidate in others:
+        if any(skills_overlap(candidate.get("skills"), member.get("skills"), threshold)
+               for member in participants):
+            out.append(candidate["id"])
+    return sorted(out)
+
+
 def cover(
     pool: Sequence[dict],
     holder_ids: Sequence[int],

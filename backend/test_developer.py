@@ -345,6 +345,103 @@ def test_an_outcome_closes_the_interview_and_moves_the_funnel(client, bd, one,
     assert after["funnel"]["hired"] == 0
 
 
+# --------------------------------------------------------------------------- #
+# Who books, and who reports back
+# --------------------------------------------------------------------------- #
+
+def test_either_side_of_a_profile_may_book(client, bd, one, make_profile):
+    """The BD runs the account most replies arrive at; the developer is who a
+    client that found them directly will email. Both find out first often
+    enough that the one who knows should not have to ask somebody else."""
+    profile = make_profile()
+    theirs = book(client, one, profile["id"], days=1, clock="10:00")
+    assert theirs["status"] == "scheduled"
+
+    ours = book(client, bd, profile["id"], days=1, clock="13:00")
+    assert ours["status"] == "scheduled"
+
+    # And each side sees what the other logged, on the same row.
+    seen = client.get(f"/api/interviews?profile_id={profile['id']}", headers=bd).json()
+    assert {row["id"] for row in seen["upcoming"]} >= {theirs["id"], ours["id"]}
+
+
+def test_one_reply_logged_twice_is_caught_rather_than_forbidden(client, bd, one,
+                                                                make_profile):
+    """What stops a reply becoming two rows is the clash check, not a
+    permission — and it reports rather than refuses, because a reschedule
+    legitimately overlaps the slot it is leaving."""
+    profile = make_profile()
+    first = book(client, bd, profile["id"], days=5, clock="11:00", duration_minutes=60)
+    again = book(client, one, profile["id"], days=5, clock="11:30")
+
+    assert again["clash"] is not None
+    assert again["clash"]["id"] == first["id"]
+    assert again["clash"]["profile"] == profile["name"]
+
+
+def test_a_developer_may_move_what_they_are_sitting(client, bd, one, make_profile):
+    """Both sides own the whole row now. The two prose fields stay split by who
+    can answer them, which is a division of labour rather than a permission."""
+    profile = make_profile()
+    booked = book(client, bd, profile["id"], days=3, clock="11:00")
+
+    moved = client.patch(f"/api/interviews/{booked['id']}",
+                         json={"scheduled_at": when(4, "16:00")}, headers=one)
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["when"]["time"] == "16:00"
+
+
+def test_the_developer_reports_back_and_the_bd_reads_it(client, bd, one, make_profile):
+    """The half of the row the developer owns. They were in the room; nobody
+    else can answer it first-hand, and the BD holds the record."""
+    profile = make_profile()
+    booked = book(client, bd, profile["id"], days=-1, clock="09:00",
+                  notes="Wants to hear about the RAG project.")
+
+    saved = client.patch(f"/api/interviews/{booked['id']}",
+                         json={"outcome": "passed",
+                               "debrief": "Went well. They are sending a take-home."},
+                         headers=one)
+    assert saved.status_code == 200, saved.text
+
+    row = client.get(f"/api/interviews?profile_id={profile['id']}",
+                     headers=bd).json()["recent"][0]
+    assert row["debrief"] == "Went well. They are sending a take-home."
+    assert row["reported_by"] == "Dev One"       # whose word it is
+    assert row["reported_at"]                    # and how fresh
+    assert row["awaiting_outcome"] is False
+    # The BD's brief is a different field and survives the debrief written over
+    # the top of it — there is no other copy of it anywhere.
+    assert row["notes"] == "Wants to hear about the RAG project."
+
+
+def test_a_developer_reports_only_on_the_identities_they_are_sold_under(
+        client, bd, two, make_profile):
+    """Somebody else's diary is refused on the server, not merely absent from
+    the screen."""
+    profile = make_profile(dev_email="dv-one@developer.example.com")
+    booked = book(client, bd, profile["id"], days=-1, clock="15:00")
+    refused = client.patch(f"/api/interviews/{booked['id']}",
+                           json={"outcome": "offer"}, headers=two)
+    assert refused.status_code == 403
+
+
+def test_a_developer_opens_one_identity_at_a_time(client, bd, one, make_profile):
+    """A developer may be sold under several profiles, and the question they
+    ask is usually about one of them: what has Khuram got today."""
+    first = make_profile()
+    second = make_profile()
+    book(client, bd, first["id"], days=0, clock="09:15", client="Sable Analytics")
+    book(client, bd, second["id"], days=0, clock="16:15", client="Verdant Labs")
+
+    just_one = client.get(f"/api/interviews?profile_id={first['id']}", headers=one).json()
+    assert [row["client"] for row in just_one["today"]] == ["Sable Analytics"]
+
+    both = client.get("/api/interviews", headers=one).json()
+    clients = {row["client"] for row in both["today"]}
+    assert {"Sable Analytics", "Verdant Labs"} <= clients
+
+
 def test_a_cancelled_interview_is_not_a_rejection(client, bd, make_profile):
     """A client who pulled out before the call did not turn anybody down, and
     counting it as a rejection makes a quiet week look like a bad one."""

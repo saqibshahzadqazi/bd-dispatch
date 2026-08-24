@@ -18,6 +18,13 @@ FIELDS = [
      "synonyms": ["platform", "source", "site", "portal", "board", "channel", "website", "medium"]},
     {"key": "date", "label": "Applied on",
      "synonyms": ["date", "applied", "appliedon", "applieddate", "appliedat", "timestamp", "day", "applydate"]},
+    # Where the posting is written out, when that is not the apply link. Never
+    # part of a fingerprint: two profiles can hold two different links to the
+    # same job's description, and matching on it would split one posting in two.
+    {"key": "description_url", "label": "Job description link",
+     "synonyms": ["descriptionurl", "description", "jobdescription", "jd", "jdlink",
+                  "jdurl", "descriptionlink", "spec", "details", "detailsurl",
+                  "jobdetails", "posting", "postingurl"]},
 ]
 
 MAX_ROWS = 20000
@@ -114,6 +121,7 @@ def project_rows(rows: list[dict], mapping: dict[str, str]) -> list[dict]:
             source = mapping.get(field["key"]) or ""
             record[field["key"]] = str(row.get(source, "") or "").strip() if source else ""
         record["url"] = safe_url(record["url"])
+        record["description_url"] = safe_url(record["description_url"])
         projected.append(record)
     return projected
 

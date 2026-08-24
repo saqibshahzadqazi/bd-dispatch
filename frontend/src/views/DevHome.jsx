@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
+import Assessments from "./Assessments.jsx";
 import Interviews from "./Interviews.jsx";
 import {
   Availability, CopyButton, CyclePicker, Funnel, InterviewRows, NextInterview,
@@ -14,6 +15,20 @@ import {
  * their identities are being worked — but the thing at the top is the next
  * interview, not the row count.
  *
+ * A developer books here too. A client that found them directly emails them
+ * directly, and making them ask somebody else to type it in is how a reply sits
+ * unanswered for a day. What stops one reply becoming two rows is not a
+ * permission but the clash check, which fires on any booking against the same
+ * developer whichever identity it was made under.
+ *
+ * The half only they can answer is still the half the screen leads them to:
+ * whether the call happened, what came of it, and how it actually went.
+ *
+ * A developer may be sold under several identities, and the question they ask
+ * is usually about one of them — what has Khuram got today. So the diary
+ * narrows to one profile at a time, and the figures narrow with it rather than
+ * staying whole and quietly disagreeing with the list underneath them.
+ *
  * Not behind the dashboard switch a BD's figures sit behind. That switch
  * exists so nobody is measured without somebody deciding to measure them; this
  * is a calendar and a resume, and withholding it only means nobody turns up.
@@ -23,7 +38,16 @@ export default function DevHome({ onOpenProfiles }) {
   const [batchId, setBatchId] = useState(null);
   const [profiles, setProfiles] = useState([]);
   const [error, setError] = useState("");
-  const [all, setAll] = useState(false);
+  // null is every identity at once. Anything else is one profile's id, and the
+  // diary, the counts and the funnel are all re-fetched narrowed to it — the
+  // server already answers that question, so nothing here has to filter a list
+  // and then disagree with a tile that was worked out from the whole one.
+  const [only, setOnly] = useState(null);
+  const [scoped, setScoped] = useState(null);
+  const [tests, setTests] = useState(null);
+  // desk | diary | assessments — the diary and the assessments are full
+  // screens rather than a strip on the desk once there is anything in them.
+  const [pane, setPane] = useState("desk");
 
   const load = useCallback(async (id) => {
     try {
@@ -47,12 +71,53 @@ export default function DevHome({ onOpenProfiles }) {
     return () => clearInterval(tick);
   }, [batchId, load]);
 
+  useEffect(() => {
+    if (!only) {
+      setScoped(null);
+      return undefined;
+    }
+    let live = true;
+    const pull = () => api.interviews(only)
+      .then((next) => { if (live) setScoped(next); })
+      .catch((err) => { if (live) setError(err.message); });
+    pull();
+    const tick = setInterval(pull, 60000);
+    return () => { live = false; clearInterval(tick); };
+  }, [only]);
+
+  // A BD can set a take-home at any moment, and the deadline on it is usually
+  // days rather than weeks.
+  useEffect(() => {
+    const pull = () => api.assessments(only)
+      .then((next) => setTests(next.counts))
+      .catch(() => {});
+    pull();
+    const tick = setInterval(pull, 60000);
+    return () => clearInterval(tick);
+  }, [only]);
+
   if (error && !data) return <div className="notice">{error}</div>;
   if (!data) return <p className="muted">Loading your day…</p>;
 
-  const { counts, today, upcoming, recent, funnel, totals } = data;
+  // Until the narrowed diary lands, the whole one stands in. It is a fraction
+  // of a second, and a blank calendar is a worse thing to show somebody than a
+  // slightly wider one.
+  const diary = (only && scoped) || data;
+  const { counts, today, upcoming, recent, funnel } = diary;
+  const { totals } = data;
+  const chosen = only ? data.profiles.find((row) => row.profile_id === only) : null;
   const next = today.find((row) => !row.is_past && row.status === "scheduled")
     || upcoming.find((row) => row.status === "scheduled");
+
+  // Every write from this screen goes through here so the person-wide figures
+  // and the narrowed ones cannot drift apart after an edit.
+  const report = (id, patch) => api.updateInterview(id, patch)
+    .then(async (saved) => {
+      await load(batchId);
+      if (only) setScoped(await api.interviews(only));
+      return saved;
+    })
+    .catch((e) => { setError(e.message); return null; });
 
   if (!data.profiles.length) {
     return (
@@ -74,6 +139,7 @@ export default function DevHome({ onOpenProfiles }) {
         <div>
           <h1>Your desk</h1>
           <p className="muted" style={{ marginTop: 3 }}>
+            {chosen && <>As <b>{chosen.name}</b>. </>}
             {counts.today
               ? <>You have <b>{counts.today} interview{counts.today === 1 ? "" : "s"} today</b>. All times Eastern.</>
               : counts.scheduled
@@ -86,9 +152,80 @@ export default function DevHome({ onOpenProfiles }) {
 
       {error && <div className="notice">{error}</div>}
 
+      {data.profiles.length > 1 && (
+        <section className="card pad">
+          <h3>Which identity are you looking at?</h3>
+          <div className="row" style={{ marginTop: 10 }}>
+            <button className={only ? "ghost" : ""} onClick={() => setOnly(null)}>
+              All of them
+            </button>
+            {data.profiles.map((row) => (
+              <button key={row.profile_id}
+                      className={only === row.profile_id ? "" : "ghost"}
+                      onClick={() => setOnly(row.profile_id)}>
+                {row.name}
+                <span style={{ opacity: 0.7, fontWeight: 400 }}>
+                  {row.headline ? ` · ${row.headline}` : ""}
+                </span>
+              </button>
+            ))}
+          </div>
+          <p className="muted" style={{ marginTop: 9 }}>
+            Each of these is a different candidate as far as a client is concerned, with its own
+            BD, its own resume and its own diary. Everything below — today, what is coming, and
+            what it all turned into — narrows to whichever you pick.
+          </p>
+        </section>
+      )}
+
+      {tests?.overdue > 0 && (
+        <div className="notice">
+          <b>{tests.overdue} assessment{tests.overdue === 1 ? " is" : "s are"} past the
+          deadline.</b>{" "}
+          A missed take-home costs the interview that earned it.{" "}
+          <button className="link" onClick={() => setPane("assessments")}>Open them</button>
+        </div>
+      )}
+
+      <div className="row" style={{ gap: 8 }}>
+        <button className={pane === "desk" ? "" : "ghost"} onClick={() => setPane("desk")}>
+          Today
+        </button>
+        <button className={pane === "diary" ? "" : "ghost"} onClick={() => setPane("diary")}>
+          Every interview{counts.total ? ` (${counts.total})` : ""}
+        </button>
+        <button className={pane === "assessments" ? "" : "ghost"}
+                onClick={() => setPane("assessments")}>
+          Assessments{tests?.open ? ` (${tests.open})` : ""}
+        </button>
+      </div>
+
+      {pane === "assessments" ? (
+        <Assessments
+          profiles={only ? profiles.filter((p) => p.id === only) : profiles}
+          profileId={only}
+          heading={chosen ? `${chosen.name}'s assessments` : "Your assessments"}
+          intro="Take-homes and tests set against the identities you are sold under. Your BD
+                 usually sets them, because the client sends them the brief — doing them, and
+                 saying how far along you are, is yours. Set one yourself if a client sent it
+                 straight to you."
+        />
+      ) : pane === "diary" ? (
+        <Interviews
+          profiles={only ? profiles.filter((p) => p.id === only) : profiles}
+          profileId={only}
+          heading={chosen ? `${chosen.name}'s interviews` : "Every interview"}
+          intro="Everything against the identities you are applied under — what is coming, what
+                 has been, and how each of them went. Book one yourself if a client emailed you
+                 directly."
+          showProfile
+          showFunnel
+        />
+      ) : (
+        <>
       {next
-        ? <NextInterview row={next} onOpen={() => setAll((on) => !on)}
-                         openLabel={all ? "Hide the diary" : "Open the diary"} />
+        ? <NextInterview row={next} onOpen={() => setPane("diary")}
+                         openLabel="Open the diary" />
         : (
           <section className="card pad row headline" style={{ justifyContent: "space-between" }}>
             <div>
@@ -102,9 +239,7 @@ export default function DevHome({ onOpenProfiles }) {
                 </p>
               </div>
             </div>
-            <button className="ghost" onClick={() => setAll((on) => !on)}>
-              {all ? "Hide the diary" : "Open the diary"}
-            </button>
+            <button className="ghost" onClick={() => setPane("diary")}>Open the diary</button>
           </section>
         )}
 
@@ -125,8 +260,9 @@ export default function DevHome({ onOpenProfiles }) {
         <div className="notice">
           <b>{counts.awaiting_outcome} interview
           {counts.awaiting_outcome === 1 ? "" : "s"} happened and nobody has said how it went.</b>{" "}
-          You were the one in the room. Setting the outcome below is the only thing that tells
-          your team whether the applications going out in your name are working.
+          You were the one in the room, so this one is yours — nobody else can answer it
+          first-hand. Set the outcome below, and open <b>notes</b> on the row to say how it
+          actually went. Your BD reads both on their own screen within the minute.
         </div>
       )}
 
@@ -138,34 +274,21 @@ export default function DevHome({ onOpenProfiles }) {
               Everything today, including what has already been — Eastern time.
             </p>
           </div>
-          <InterviewRows rows={today} showProfile onChange={(id, patch) =>
-            api.updateInterview(id, patch).then(() => load(batchId)).catch((e) => setError(e.message))} />
+          <InterviewRows rows={today} showProfile onChange={report} />
         </section>
       )}
 
-      {all ? (
-        <Interviews
-          profiles={profiles}
-          heading="Your diary"
-          intro="Every interview against the identities you are applied under. Log one yourself if a
-                 client emailed you directly."
-          showProfile
-          showFunnel={false}
-        />
-      ) : (
-        upcoming.length > 0 && (
-          <section className="stack" style={{ gap: 8 }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <div>
-                <h2>Coming up</h2>
-                <p className="muted" style={{ marginTop: 3 }}>The next fortnight.</p>
-              </div>
-              <button className="ghost" onClick={() => setAll(true)}>Open the diary</button>
+      {upcoming.length > 0 && (
+        <section className="stack" style={{ gap: 8 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <h2>Coming up</h2>
+              <p className="muted" style={{ marginTop: 3 }}>The next fortnight.</p>
             </div>
-            <InterviewRows rows={upcoming} showProfile onChange={(id, patch) =>
-              api.updateInterview(id, patch).then(() => load(batchId)).catch((e) => setError(e.message))} />
-          </section>
-        )
+            <button className="ghost" onClick={() => setPane("diary")}>Open the diary</button>
+          </div>
+          <InterviewRows rows={upcoming} showProfile onChange={report} />
+        </section>
       )}
 
       <section className="stack" style={{ gap: 8 }}>
@@ -256,13 +379,16 @@ export default function DevHome({ onOpenProfiles }) {
           <div>
             <h2>Your record</h2>
             <p className="muted" style={{ marginTop: 3 }}>
-              Interviews that have been and gone. Setting the outcome is what tells your team
-              whether the applications going out in your name are working.
+              Interviews that have been and gone. Setting the outcome, and writing the note
+              under <b>notes</b>, is what tells your team whether the applications going out in
+              your name are working — and it is the only part of this row they cannot fill in
+              themselves.
             </p>
           </div>
-          <InterviewRows rows={recent} showProfile onChange={(id, patch) =>
-            api.updateInterview(id, patch).then(() => load(batchId)).catch((e) => setError(e.message))} />
+          <InterviewRows rows={recent} showProfile onChange={report} />
         </section>
+      )}
+        </>
       )}
     </div>
   );

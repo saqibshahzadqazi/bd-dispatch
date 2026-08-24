@@ -15,6 +15,17 @@ purely additive: `interviews` is a new table create_all makes on its own, and
 the profile columns go on below with LATER_COLUMNS. Nothing is rebuilt and
 nothing is lost, so upgrading to it is only ever a restart.
 
+Version 2.3 split an interview in two along the line of who knows: the BD books
+it, the developer says how it went. That is three more optional columns on
+`interviews` and no change to any row already there — an interview from before
+the split keeps its brief and simply has no debrief, which is the truth.
+
+Version 2.4 added the stage ladder, the description link on a job, and
+assessments. `assessments` is a new table create_all makes on its own; the two
+columns go on below. Additive again, so upgrading is a restart. Every interview
+already recorded lands on `screening`, which is what most first conversations
+were, and can be moved.
+
 Everything below is idempotent. A brand new database skips it entirely.
 """
 from __future__ import annotations
@@ -55,6 +66,27 @@ LATER_COLUMNS = {
         ("rate", "VARCHAR(40) DEFAULT ''"),
         ("availability", "VARCHAR(16) DEFAULT 'open'"),
         ("bio", "TEXT DEFAULT ''"),
+    ],
+    # v2.3 — the developer's half of an interview. `notes` was always the BD's
+    # brief; these are what the person who sat the call says afterwards, and
+    # who said it. Empty on every existing row, which reads correctly: nobody
+    # has debriefed an interview that happened before the field existed.
+    #
+    # v2.4 — the rung on the ladder. 'screening' rather than NULL for every
+    # existing row: an interview logged before stages existed was somebody's
+    # first conversation with that client far more often than not, and a
+    # default that is usually right beats a blank on every historical row.
+    "interviews": [
+        ("debrief", "TEXT DEFAULT ''"),
+        ("reported_by", "INTEGER"),
+        ("reported_at", "TIMESTAMP"),
+        ("stage", "VARCHAR(16) DEFAULT 'screening'"),
+    ],
+    # v2.4 — where the posting is written out, when that is not the apply link.
+    # Empty on every job already recorded, which is the truth: nobody was asked
+    # for it at the time.
+    "jobs": [
+        ("description_url", "TEXT DEFAULT ''"),
     ],
     # FALSE, so an upgrade does not hand every existing person a dashboard
     # nobody chose to open. The manager turns them on one at a time.

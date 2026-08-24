@@ -2,11 +2,16 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 
 const COLUMNS = [
-  { key: "url", label: "Job link", width: "34%", hint: "https://…" },
-  { key: "title", label: "Job title", width: "26%", hint: "" },
-  { key: "company", label: "Client", width: "18%", hint: "" },
-  { key: "platform", label: "Platform", width: "12%", hint: "" },
-  { key: "date", label: "Applied on", width: "14%", hint: "" },
+  { key: "url", label: "Job link", width: "26%", hint: "https://…" },
+  { key: "title", label: "Job title", width: "20%", hint: "" },
+  { key: "company", label: "Client", width: "14%", hint: "" },
+  // Where the posting is written out, when that is not the apply link. The
+  // apply link is usually dead three weeks later — an expired posting
+  // redirects to a board's home page and takes the wording with it — and this
+  // is what a BD still has when the client finally replies.
+  { key: "description_url", label: "Description link", width: "20%", hint: "optional" },
+  { key: "platform", label: "Platform", width: "10%", hint: "" },
+  { key: "date", label: "Applied on", width: "10%", hint: "" },
 ];
 
 // The team works to Eastern time. Match app/models.py if that ever changes.
@@ -28,7 +33,8 @@ export function stampNow() {
 // counting it would file blank rows as work. The platform alone identifies
 // nothing either. Matches ingest.is_usable on the server.
 const IDENTIFYING = ["url", "title", "company"];
-const blankRow = () => ({ url: "", title: "", company: "", platform: "", date: stampNow() });
+const blankRow = () => ({ url: "", title: "", company: "", description_url: "",
+                          platform: "", date: stampNow() });
 const isEmpty = (row) => IDENTIFYING.every((key) => !String(row[key] || "").trim());
 
 /** Rows typed in by hand, saved as this profile's sheet for the cycle. */

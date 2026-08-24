@@ -6,12 +6,22 @@ one of them is a variation on "what is next, and did the last one work".
 
 The distinction this module exists to hold:
 
+  draft       a client replied and somebody started the row from the job
+              record. No time is agreed yet, so it is in no rate, no funnel and
+              no count of what is coming — none of that is true of it. It is
+              its own list on every screen, because a reply nobody has answered
+              is a thing to chase, not a thing to forget.
   scheduled   somebody agreed a time. It has not happened yet.
   done        it happened. `outcome` then says what came of it.
   no_show     it did not happen and nobody said so beforehand.
   cancelled   called off. Never counted in a rate — a client who pulled out
               before the call did not reject anybody, and counting it as a
               rejection would make a quiet week look like a bad one.
+
+A `stage` runs across all of that: screening, technical, assessment, final,
+offer. Where a conversation died matters more than that it died — a team losing
+everyone at technical has a different problem from one losing them at final —
+so the stage is carried on every row and counted in `by_stage` below.
 
 `awaiting_outcome` is the number worth putting on a screen: interviews whose
 time has come and gone while the status still says `scheduled`. Nobody has said
@@ -31,14 +41,15 @@ from typing import Optional, Sequence
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import (Application, BatchApplication, Interview, Profile, User,
-                     utcnow, working_label, working_today)
+from .models import (INTERVIEW_STAGES, Application, BatchApplication, Interview,
+                     Job, Profile, User, utcnow, working_label, working_today)
 
 UPCOMING_DAYS = 14        # how far ahead "coming up" looks
 RECENT_ROWS = 10          # how far back the finished list goes
 
 # An interview that never happened is not a rejection, so these are the rows a
-# rate is worked out over.
+# rate is worked out over. `draft` is out for a different reason: nobody has
+# agreed a time, so there is no conversation yet to have a rate about.
 LIVE = ("scheduled", "done", "no_show")
 WON = ("offer", "hired")
 CLEARED = ("passed", "offer", "hired")
@@ -89,7 +100,16 @@ def decorate(db: Session, rows: Sequence[Interview]) -> list[dict]:
     profile_ids = {row.profile_id for row in rows}
     profiles = {p.id: p for p in db.scalars(
         select(Profile).where(Profile.id.in_(profile_ids)))}
+    # The posting the conversation came from. Carried onto the row so a BD
+    # reading a client's reply three weeks later has the wording that was
+    # applied to, without going back to the job record to find it.
+    job_ids = {row.job_id for row in rows} - {None}
+    jobs = {j.id: j for j in db.scalars(
+        select(Job).where(Job.id.in_(job_ids)))} if job_ids else {}
     wanted = {p.user_id for p in profiles.values()} | {p.dev_user_id for p in profiles.values()}
+    # Whoever said how it went, which is usually but not always the developer
+    # currently behind the profile — a profile can be handed on after the call.
+    wanted |= {row.reported_by for row in rows}
     wanted.discard(None)
     people = {u.id: u for u in db.scalars(select(User).where(User.id.in_(wanted)))} if wanted else {}
 
@@ -101,9 +121,12 @@ def decorate(db: Session, rows: Sequence[Interview]) -> list[dict]:
         profile = profiles.get(row.profile_id)
         developer = people.get(profile.dev_user_id) if profile else None
         runner = people.get(profile.user_id) if profile else None
+        job = jobs.get(row.job_id)
         when = working_label(row.scheduled_at)
         day = dt.date.fromisoformat(when["day"])
-        gone = _naive_utc(row.scheduled_at) < now
+        # A draft is parked an hour out and means nothing by it, so it is never
+        # "past" and never in the count of things nobody reported on.
+        gone = row.status != "draft" and _naive_utc(row.scheduled_at) < now
         out.append({
             "id": row.id,
             "profile_id": row.profile_id,
@@ -118,8 +141,22 @@ def decorate(db: Session, rows: Sequence[Interview]) -> list[dict]:
             "mode": row.mode,
             "link": row.link,
             "status": row.status,
+            "stage": row.stage or "screening",
+            "is_draft": row.status == "draft",
+            # What the job record holds, when the interview came from one.
+            "job": ({"id": job.id, "title": job.title or "", "company": job.company or "",
+                     "url": job.url or "", "description_url": job.description_url or "",
+                     "platform": job.platform or ""} if job else None),
             "outcome": row.outcome,
+            # The two halves of the row, kept apart. `notes` is the BD's brief,
+            # written when it was booked; `debrief` is what the person in the
+            # room said afterwards.
             "notes": row.notes,
+            "debrief": row.debrief or "",
+            "reported_by": (people[row.reported_by].name
+                            if row.reported_by in people else None),
+            "reported_at": (working_label(row.reported_at)["label"]
+                            if row.reported_at else None),
             "duration_minutes": row.duration_minutes,
             "when": when,
             "is_today": day == today,
@@ -143,8 +180,15 @@ def split(rows: Sequence[dict], upcoming_days: int = UPCOMING_DAYS,
     now: list[dict] = []
     soon: list[dict] = []
     done: list[dict] = []
+    waiting: list[dict] = []
     for row in rows:
         day = dt.date.fromisoformat(row["when"]["day"])
+        if row["status"] == "draft":
+            # Never in the diary — there is no time in it to be in the diary
+            # with. Newest first: the reply that just came in is the one
+            # somebody is about to answer.
+            waiting.append(row)
+            continue
         if row["status"] == "cancelled":
             # Kept in the upcoming list rather than dropped, because a slot
             # that vanishes silently reads exactly like a slot that was never
@@ -163,15 +207,20 @@ def split(rows: Sequence[dict], upcoming_days: int = UPCOMING_DAYS,
 
     soon.sort(key=lambda r: r["when"]["iso"])
     done.sort(key=lambda r: r["when"]["iso"], reverse=True)
-    return {"today": now, "upcoming": soon, "recent": done[:recent]}
+    waiting.sort(key=lambda r: r["id"], reverse=True)
+    return {"today": now, "upcoming": soon, "recent": done[:recent],
+            "awaiting_time": waiting}
 
 
 def counts(rows: Sequence[dict]) -> dict:
     """The figures a headline is made of."""
     today = working_today()
     week = today + dt.timedelta(days=7)
-    live = [row for row in rows if row["status"] != "cancelled"]
+    live = [row for row in rows if row["status"] not in ("cancelled", "draft")]
     return {
+        # Replies somebody started and has not agreed a time for. The one
+        # number on this screen that is a thing to go and do.
+        "awaiting_time": sum(1 for row in rows if row["status"] == "draft"),
         "today": sum(1 for row in live if row["is_today"]),
         "week": sum(1 for row in live
                     if today <= dt.date.fromisoformat(row["when"]["day"]) <= week),
@@ -231,6 +280,11 @@ def funnel(db: Session, profile_ids: Optional[Sequence[int]] = None,
         "hired": hired,
         "cancelled": sum(1 for row in rows if row.status == "cancelled"),
         "rejected": sum(1 for row in live if row.outcome == "rejected"),
+        # Replies with no time agreed. Not part of any rate — nothing has
+        # happened — but the number a team should clear before reading the
+        # rest, because each one is a client waiting on an answer.
+        "awaiting_time": sum(1 for row in rows if row.status == "draft"),
+        "by_stage": by_stage(live),
         # Out of a hundred applications, how many got somebody talking.
         "interview_rate": _pct(len(live), applications),
         # Out of a hundred conversations, how many ended in an offer.
@@ -242,6 +296,31 @@ def funnel(db: Session, profile_ids: Optional[Sequence[int]] = None,
 # --------------------------------------------------------------------------- #
 # Developers
 # --------------------------------------------------------------------------- #
+
+def by_stage(rows: Sequence[Interview]) -> list[dict]:
+    """How many conversations reached each rung, and how many died there.
+
+    The figure the funnel above cannot show. A team losing everybody at
+    `technical` has a tooling problem; a team losing them at `final` has a
+    rate or an availability problem, and those call for opposite fixes. Both
+    look identical in a single interviews-to-offers percentage.
+
+    `reached` counts every sitting at that rung. `cleared` is the ones that went
+    on — an outcome of passed, offer or hired. `lost` is the ones that ended
+    there. The rest are still open, which is why the three do not sum.
+    """
+    out = []
+    for stage in INTERVIEW_STAGES:
+        here = [row for row in rows if (row.stage or "screening") == stage]
+        if not here:
+            out.append({"stage": stage, "reached": 0, "cleared": 0, "lost": 0, "rate": 0})
+            continue
+        cleared = sum(1 for row in here if row.outcome in CLEARED)
+        lost = sum(1 for row in here if row.outcome == "rejected")
+        out.append({"stage": stage, "reached": len(here), "cleared": cleared,
+                    "lost": lost, "rate": _pct(cleared, len(here))})
+    return out
+
 
 def developer_rows(db: Session) -> list[dict]:
     """Every developer, with the identities they are sold under.

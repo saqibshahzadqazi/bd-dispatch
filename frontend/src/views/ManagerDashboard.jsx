@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { api, safeUrl } from "../api.js";
 import {
   Availability, CyclePicker, DeveloperBoard, Funnel, InterviewRows, Progress,
-  Skills, Sparkline, TeamBoard, Tiles, sinceText,
+  Skills, Sparkline, StageLadder, TeamBoard, Tiles, sinceText,
 } from "./widgets.jsx";
 import PersonDashboard from "./PersonDashboard.jsx";
 
@@ -57,6 +57,7 @@ function DeveloperView({ person, batchId, onClose }) {
       ]} />
 
       <Funnel data={funnel} awaiting={counts.awaiting_outcome} />
+      <StageLadder rows={funnel?.by_stage} />
 
       {data.profiles.length > 0 && (
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
@@ -431,6 +432,15 @@ export default function ManagerDashboard({ onOpenBatches }) {
         </div>
       )}
 
+      {diary && diary.counts.awaiting_time > 0 && (
+        <div className="notice gate">
+          <b>{diary.counts.awaiting_time} {diary.counts.awaiting_time === 1
+            ? "reply is" : "replies are"} waiting on a time.</b>{" "}
+          Somebody started them from the job record and has not agreed a time with the client.
+          Until they do, nobody has anything to turn up to and they count towards nothing below.
+        </div>
+      )}
+
       {diary && diary.counts.today > 0 && (
         <div className="notice gate">
           <b>{diary.counts.today} interview{diary.counts.today === 1 ? "" : "s"} today.</b>{" "}
@@ -458,6 +468,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
             piece of work. This is the other half, and the only part of it a client decides.
           </p>
         </div>
+        <StageLadder rows={data.funnel?.by_stage} />
         <Funnel data={data.funnel} awaiting={diary?.counts.awaiting_outcome || 0}
                 note="Applications are all-time across the workspace. Interviews are never
                       filtered to a cycle: a reply that lands three weeks late belongs to the

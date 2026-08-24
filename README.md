@@ -58,11 +58,12 @@ A profile is an identity. Somebody has to actually be it.
 - The **developer** is who the profile sells — the person who sits the
   interview and writes the code. On screen: *developer*.
 
-Two different people, kept apart on purpose. A BD is never handed the
-developer's calendar to manage. A developer can never mark a job applied,
-because that would put work into a BD's record that the BD did not do, and
-retire a posting from the rotation on the strength of somebody who never
-applied for it.
+Two different people, kept apart on purpose. The BD holds the profile's whole
+record: what it applied to, what came back, where each of those stands, and the
+diary of every reply that turned into a conversation. A developer can never
+mark a job applied, because that would put work into a BD's record that the BD
+did not do, and retire a posting from the rotation on the strength of somebody
+who never applied for it.
 
 What the developer owns is their own information: the email a client replies
 to, the resume link the BD attaches, their skills, their rate, the hours they
@@ -85,10 +86,114 @@ single piece of work.
 
 An **interview** is the first thing here that records an outcome.
 
-When a client replies, whoever heard first logs it: the BD who runs the
-account, or the developer the client emailed directly. Both may, because both
-find out first about half the time, and the one who knows should not have to
-ask somebody else to type it in.
+**Either side books it.** The BD runs the account most replies arrive at and
+holds the record of everything applied for; the developer is who a client that
+found them directly will email. Both find out first often enough that the one
+who knows should not have to ask somebody else to type it in. What stops one
+reply becoming two rows is not a permission but the clash check — it fires on
+any booking against the same developer, whichever identity it was made under.
+
+**The row still has two halves**, because two different people can answer them:
+
+| | Usually the BD | Only the developer really knows |
+|---|---|---|
+| when it is, how long, where | ✓ | |
+| the client, the role, the link | ✓ | |
+| the brief — what to lead with | ✓ | |
+| happened / no show / cancelled | | ✓ |
+| the outcome | | ✓ |
+| the debrief — how the call actually went | | ✓ |
+
+That is a division of labour, not a permission: either side may write either
+half, and a BD who took the debrief over the phone types it in themselves. What
+the app will not do is let the brief and the debrief overwrite each other. They
+are separate fields, because a debrief typed over the top of a brief loses what
+the client actually asked for and there is no second copy of it anywhere.
+
+Every update is on the other person's screen within the minute with no
+forwarding, and the row says whose word it is — *Khuram Gill reported it ·
+Mon 24 Aug · 12:05*.
+
+### The ladder
+
+A conversation is not one event. It climbs:
+
+```
+screening  ->  technical  ->  assessment  ->  final  ->  offer
+```
+
+Each sitting carries its rung, and the dashboard shows how many reached each
+one, how many went on, and how many ended there. That is the thing a single
+applications-to-offers percentage cannot tell you: a team losing everybody at
+**technical** has a tooling problem, one losing them at **final** has a rate or
+an availability problem, and those call for opposite fixes.
+
+`assessment` is a rung rather than something beside the ladder, because a
+take-home is a place a candidate is *at* — the client is not talking to anyone
+else while it is out.
+
+### A reply, before there is a time
+
+A client answers on Tuesday and the call is not agreed until Thursday. In
+between, the conversation exists and nothing in a diary can hold it.
+
+So it can be started with no time at all. Open **All jobs**, find the posting
+they replied about, and press *they replied* — the title, the client and both
+links come across from the record, and the row waits under **Waiting on a
+time**. It is in no rate, no funnel and no count of what is coming, because
+none of that is true of it yet. Putting a time in is what books it; there is
+deliberately no second confirm button, since agreeing the time *is* the
+confirmation and an extra step is one somebody forgets.
+
+---
+
+## Every job, and finding the one they mean
+
+A client's reply names a company and maybe a job title. It arrives three weeks
+after the application that earned it, by which time that cycle is closed and
+gone from every cycle-scoped screen in the app.
+
+**All jobs** is the one screen that goes back to the beginning. Every posting
+every profile you run has ever applied to, searchable by client, title,
+platform or link — because somebody pasting out of an email has no idea which
+field the thing they copied lives in. Find the row, start the conversation from
+it, and nothing is retyped.
+
+Two links are kept per job, not one:
+
+- **the apply link** — where the application went;
+- **the job description link** — where the posting is written out.
+
+They are usually the same on the day and rarely the same three weeks later. An
+expired posting redirects to a board's home page and takes the wording with it,
+and the wording is exactly what a BD needs when the client finally answers. The
+description link is never part of a fingerprint: two profiles can hold two
+different links to the same job's description, and matching on it would split
+one posting in two.
+
+---
+
+## Assessments
+
+The third thing a client can ask for, after a reply and a call, and the one
+that costs a developer a weekend.
+
+Same shape as an interview and split the same way. The BD sets it — the client
+sent them the brief, the link and the deadline. The developer does it, and says
+how far along they are and what went back. Either may write either half.
+
+    sent -> in progress -> submitted -> passed / did not pass
+
+It does not need an interview to exist first. Plenty of clients screen with a
+test before anybody speaks, and an assessment that could only hang off a call
+would force somebody to invent a call that never happened. When it *did* come
+out of a round, it links back to it and reads as "after the technical round".
+
+**No deadline is a real answer**, and the commonest one after "next Friday". It
+stays empty rather than becoming today, because an invented deadline is a red
+flag on somebody's screen that nobody set. One that *is* set and passes turns
+the row over — but only while it is still open. A take-home submitted late is a
+thing that happened, not a thing to chase.
 
 - **The time is Eastern.** Always, said out loud on the form and again on every
   row. A BD in Karachi and a developer in Lisbon have to read one appointment
@@ -182,6 +287,40 @@ reporting a figure it knows is too low.
 A job leaves a profile's rotation for good only when that profile marks it
 **applied** or **skipped**. Anything left as *to do* comes back next cycle.
 
+A **skipped** job also leaves the list the instant it is marked. There is
+nothing further to do about a posting this profile has turned down, and it is
+never offered again — so a greyed-out row that can only be scrolled past is not
+worth the space. The mark itself is kept underneath, because that row is what
+stops the job coming back. Downloads keep every row, skipped included: a
+download is the record of what the cycle dispatched, not a list of things to do.
+
+Every job on a list also says **who found it**. A run of jobs from one
+colleague's profile that are all wrong for yours is a fixable thing — but only
+if you can see whose search they came from.
+
+### Profiles that have not handed anything in
+
+A cycle opens, two profiles report in, and a third selling the same skills has
+logged nothing yet — because they are new, or were away, or have not got to it.
+Leaving them out means the profile with the most spare capacity is the one
+handed no work, which is backwards. So they join as recipients: they receive
+the pool without having fed it, and their own history still blocks anything
+they have already applied to. A late joiner is given jobs, not given away.
+
+Matched on **skills**, not on the headline, so "AI Engineer" and "ML Engineer"
+are recognised as the same market. Two guards keep it from being a free-for-all:
+
+- A profile with **no skills recorded is never pulled in.** An empty field is
+  not a match — it is a profile nobody has finished setting up, and handing it
+  a stranger's pool would be a guess rather than an inference.
+- **Shared tooling does not count on its own.** An AI engineer and a front-end
+  engineer both run Postgres in Docker on AWS. Matching on that is exactly how
+  a full-stack profile ends up in an AI cycle, so infrastructure is stripped
+  before the comparison; a shared language or framework still counts.
+
+The report says how many were pulled in this way, so a manager seeing jobs on a
+list they did not expect can find out how they got there.
+
 ---
 
 ## The dashboards
@@ -209,6 +348,16 @@ Their day, not their score.
 It opens on the next interview — the time, the client, the identity they are
 being sold as, and the button that joins the call. Today's list sits under it,
 then what is coming in the fortnight.
+
+A developer may be sold under several identities, and the question they
+actually have is usually about one of them — *what has Khuram got today*. So
+the screen narrows to one profile at a time, and the figures narrow with it
+rather than staying whole and quietly disagreeing with the list underneath
+them. **All of them** is still there and is where it opens.
+
+The booking is read-only to them. What they write is the half a BD cannot
+answer: whether the call happened, what came of it, and — under **notes** on
+the row — how it actually went. It reaches their BD the moment they save it.
 
 Then their own record: how many applications have gone out in their name, how
 many became conversations, what came of them. They are entitled to that. It is
@@ -391,6 +540,7 @@ pytest test_matching.py -v      # 26 rules: fingerprints, fuzzy merge, both mode
 pytest test_e2e.py -v -s        # full round trip, prints the report
 pytest test_dashboard.py -v     # the figures, and who may see whose
 pytest test_developer.py -v     # the developer side: the clock, the clash, the funnel
+pytest test_pipeline.py -v      # the record, the ladder, assessments, skill joins
 pytest                          # all of it
 ```
 
@@ -446,20 +596,30 @@ colleague's machine.
 5. Work the list in the browser or download it as Excel. Marking jobs
    **applied** or **skipped** as you go is what keeps the next cycle accurate,
    and those marks survive every rebuild.
-6. When a client replies, open **Interviews** and log it. Pick the identity,
-   the time in Eastern, who the client is. It lands on the developer's screen
-   without anybody forwarding an email, and you are told there and then if it
-   collides with something they already have.
-7. Afterwards, somebody records how it went — the developer usually, since they
-   were in the room. That single field is what makes every rate in the app
-   mean anything.
+6. When a client replies, open **All jobs**, search for what they mentioned,
+   and press *they replied* on the row. The posting comes across whole and the
+   conversation waits under **Interviews → Waiting on a time**. Put a time on
+   it once you have agreed one and it is booked — you are told there and then
+   if it collides with something that developer already has. Either side may
+   book; a developer emailed directly does not have to forward it first.
+7. Afterwards the **developer** records how it went, and writes the debrief
+   under **notes** on the row. They were in the room; nobody else can answer it
+   first-hand. Both appear on the BD's screen within the minute, tagged with
+   who said so and when. That single outcome field is what makes every rate in
+   the app mean anything.
+7b. If the client sends a take-home, put it under **Assessments** with whatever
+   deadline they gave — or none, if they gave none. The developer picks it up
+   there, and anything still open past its deadline is called out on both
+   screens.
 8. **Close cycle** when the round is done. That stops the rebuilds and stops
    accepting sheets. Reopen it if you closed too early. Interviews are not
    attached to a cycle and are unaffected: a reply that arrives three weeks
    late belongs to the work that earned it.
 
-Sheets can be any of `.xlsx`, `.xls`, `.csv`, `.tsv`. Only five columns are
-read; everything else is ignored.
+Sheets can be any of `.xlsx`, `.xls`, `.csv`, `.tsv`. Only six columns are
+read — job link, job title, client, job description link, platform, applied
+on — and everything else is ignored. The mapper guesses which is which and the
+guess is editable.
 
 ### Reading the overlap matrix
 
@@ -499,6 +659,18 @@ purely additive — a new table and eight optional columns, all empty — so
 upgrading to it is a restart and nothing else. Every existing profile carries
 on with nobody behind it and no diary, which is exactly how it behaved before
 the columns existed, until a manager attaches somebody.
+
+Version 2.3 added the developer's half of an interview — the debrief, and who
+reported it. Three optional columns on `interviews`, no row rewritten: one from
+before the split keeps its brief and simply has no debrief, which is the truth
+about it.
+
+Version 2.4 added the stage ladder, the job description link, drafts and
+assessments. `assessments` is a new table `create_all` makes on its own; the
+rest is two more optional columns. Every interview already recorded lands on
+`screening`, which is what most first conversations were, and can be moved.
+
+Both are restart-only. Back up the file first anyway — it is one `cp`.
 
 Back up the file first anyway — it is one `cp`.
 
@@ -558,9 +730,10 @@ backend/
   app/
     main.py       FastAPI app, auth, all routes
     models.py     Tables, and the constraints that carry the guarantees
-    matching.py   Fingerprints, fuzzy merge, cover and split — pure functions
+    matching.py   Fingerprints, fuzzy merge, skills overlap, cover and split
     dashboard.py  Progress figures — read-only queries, no writes anywhere
-    interviews.py The diary and the funnel — read-only too
+    interviews.py The diary, the ladder and the funnel — read-only too
+    assessments.py Take-homes and their deadlines — read-only too
     ingest.py     Spreadsheet reading and column auto-detection
     exports.py    Excel output
     schema.py     The v1 -> v2 upgrade
@@ -580,6 +753,9 @@ frontend/
       DevHome.jsx          A developer's day — the diary and their record
       DevProfiles.jsx      What a client is handed, kept by the developer
       Interviews.jsx       Scheduling and the diary — one component, three screens
+      JobRecord.jsx        Every job ever applied for, searched, and the
+                           interview started from a row
+      Assessments.jsx      Take-homes: set on one side, done on the other
       AdminHome.jsx        Running cycles
       People.jsx           People, profiles, developers, and who is on the board
       widgets.jsx          Tiles, sparklines, progress bars, the board, the funnel

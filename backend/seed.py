@@ -25,8 +25,8 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.main import SessionLocal, engine, hash_password
-from app.models import (Base, Interview, Profile, User, from_working,
-                        working_today)
+from app.models import (Assessment, Base, Interview, Profile, User,
+                        from_working, working_today)
 
 TEAM = [
     ("ali@example.com", "Ali Raza"),
@@ -179,40 +179,98 @@ def seed_interviews(db) -> list[str]:
         day = today + dt.timedelta(days=days)
         return from_working(f"{day.isoformat()}T{clock}")
 
-    #        profile,  days, clock,  client, role, mode, status, outcome
+    # The last field is the developer's debrief — what the person in the room
+    # said afterwards. Empty on everything still ahead, because nobody debriefs
+    # a call that has not happened, and on the one from yesterday, because that
+    # is the row the nag on every screen is pointing at.
+    #
+    # The last two fields are the rung on the ladder and the developer's
+    # debrief. Nothing ahead of today carries a debrief — nobody reports on a
+    # call that has not happened — and neither does the one from yesterday,
+    # because that is the row the nag on every screen is pointing at.
+    #
+    #        profile,  days, clock,  client, role, mode, status, outcome, mins, stage, debrief
     plan = [
         ("Khuram", 0, "15:00", "Northwind Digital", "RAG Pipeline Developer",
-         "video", "scheduled", "pending", 45),
+         "video", "scheduled", "pending", 45, "technical", ""),
         ("Zahid", 0, "17:30", "Sable Analytics", "Computer Vision Engineer",
-         "call", "scheduled", "pending", 30),
+         "call", "scheduled", "pending", 30, "screening", ""),
         ("Khuram", 2, "14:00", "Verdant Labs", "LLM Fine-tuning Engineer",
-         "video", "scheduled", "pending", 60),
+         "video", "scheduled", "pending", 60, "final", ""),
         ("Nadia", 3, "16:00", "Orchard Retail Pvt Ltd", "Senior React Developer",
-         "video", "scheduled", "pending", 45),
+         "video", "scheduled", "pending", 45, "screening", ""),
         # Yesterday, still unreported — this is what puts the nag on the screens.
         ("Nadia", -1, "15:30", "Harbourstone LLC", "Django Backend Developer",
-         "video", "scheduled", "pending", 30),
+         "video", "scheduled", "pending", 30, "technical", ""),
         ("Nadia", -4, "17:00", "Copperline Media", "Full Stack Engineer",
-         "video", "done", "offer", 45),
+         "video", "done", "offer", 45, "final",
+         "Two rounds in one. They want a start date rather than another call."),
         ("Khuram", -6, "16:00", "Larkspur Data", "Document AI / OCR Specialist",
-         "video", "done", "passed", 30),
+         "video", "done", "passed", 30, "screening",
+         "Went long on the OCR pipeline. They are sending a take-home by Friday."),
         ("Zahid", -9, "18:00", "Talloak Systems", "ML Ops Engineer - AWS",
-         "video", "done", "rejected", 45),
+         "video", "done", "rejected", 45, "technical",
+         "Wanted five years of Kubernetes in production. Worth filtering for next time."),
     ]
 
     made = 0
-    for name, days, clock, client, role, mode, status, outcome, minutes in plan:
+    booked: dict[str, Interview] = {}
+    for name, days, clock, client, role, mode, status, outcome, minutes, stage, debrief in plan:
         profile = profiles.get(name)
         if profile is None:
             continue
-        db.add(Interview(profile_id=profile.id, client=client, role=role,
-                         scheduled_at=at(days, clock), duration_minutes=minutes,
-                         mode=mode, status=status, outcome=outcome,
-                         link="https://meet.example.com/" + name.lower(),
-                         notes="Wants to hear about the last thing you shipped."))
+        row = Interview(profile_id=profile.id, client=client, role=role,
+                        scheduled_at=at(days, clock), duration_minutes=minutes,
+                        mode=mode, status=status, outcome=outcome, stage=stage,
+                        link="https://meet.example.com/" + name.lower(),
+                        # The BD's brief, written when they booked it.
+                        notes="Wants to hear about the last thing you shipped.",
+                        created_by=profile.user_id,
+                        debrief=debrief,
+                        # And reported by whoever sat it, when there is
+                        # anything to report.
+                        reported_by=profile.dev_user_id if debrief else None,
+                        reported_at=at(days, clock) if debrief else None)
+        db.add(row)
+        booked.setdefault(f"{name}:{client}", row)
         made += 1
+    db.flush()
+
+    # A reply somebody started from the job record and has not agreed a time
+    # for. Every screen has a "waiting on a time" list and it should not be
+    # empty on a fresh install, or nobody discovers it exists.
+    khuram = profiles.get("Khuram")
+    if khuram is not None:
+        db.add(Interview(profile_id=khuram.id, client="Ironvale Systems",
+                         role="Senior RAG Engineer", scheduled_at=at(0, "12:00"),
+                         duration_minutes=45, mode="video", status="draft",
+                         stage="screening", created_by=khuram.user_id,
+                         notes="Replied to the January application. Wants to talk this week."))
+        made += 1
+
+    # And one take-home out of the round that produced it, plus one nobody has
+    # started, so the assessments screen has both halves on it.
+    cleared = booked.get("Khuram:Larkspur Data")
+    if khuram is not None and cleared is not None:
+        db.add(Assessment(profile_id=khuram.id, interview_id=cleared.id,
+                          title="Take-home · Document AI pipeline",
+                          client="Larkspur Data",
+                          brief="Extract line items from twenty scanned invoices. "
+                                "Python, any OCR stack. Half a day at most.",
+                          link="https://example.com/take-home/larkspur",
+                          due_at=at(2, "17:00"), status="in_progress",
+                          created_by=khuram.user_id, updated_by=khuram.dev_user_id))
+    nadia = profiles.get("Nadia")
+    if nadia is not None:
+        db.add(Assessment(profile_id=nadia.id, title="Coding test · React",
+                          client="Orchard Retail Pvt Ltd",
+                          brief="Two hours, their platform. Sent before the first call.",
+                          due_at=at(-1, "17:00"), status="sent",
+                          created_by=nadia.user_id, updated_by=nadia.user_id))
+
     db.commit()
-    return [f"{made} sample interviews, two of them today"] if made else []
+    return [f"{made} sample interviews, two of them today, one waiting on a time",
+            "2 sample assessments, one of them already late"] if made else []
 
 
 def make_samples(folder: str = "sample_sheets") -> None:

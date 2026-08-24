@@ -350,10 +350,37 @@ export function NextInterview({ row, onOpen, openLabel = "All interviews" }) {
   );
 }
 
-/** Interviews as a table. Leave `onChange` off for a screen that only reads. */
+/** The rungs, in order, as a person would say them.
+ *
+ * Ordered because the order is the product: a screening call and a final round
+ * are not the same event, and a team that cannot tell them apart cannot see
+ * where its conversations die. Kept here rather than in each screen so the
+ * words are the same wherever a stage is shown.
+ */
+export const STAGE_LABELS = {
+  screening: "screening call",
+  technical: "technical round",
+  assessment: "take-home",
+  final: "final round",
+  offer: "offer talks",
+};
+
+
+/** Interviews as a table.
+ *
+ * Two people read this and they can do different things to it. `canBook` is
+ * the BD or the manager: they agreed the time with the client, so the status,
+ * the outcome and the row itself are theirs to change. Without it — a
+ * developer — the booking is read-only and the only thing they can write is
+ * the half nobody else can answer: what happened on the call.
+ *
+ * Leave `onChange` off entirely for a screen that only reads.
+ */
 export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
-                               empty = "Nothing scheduled." }) {
+                               canBook = true, empty = "Nothing scheduled." }) {
+  const [open, setOpen] = React.useState(null);
   if (!rows?.length) return <div className="card pad muted">{empty}</div>;
+  const columns = showProfile ? 8 : 7;
   return (
     <div className="card scroll">
       <table className="board">
@@ -364,70 +391,253 @@ export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
             <th>Client</th>
             <th>Role</th>
             <th>How</th>
+            <th style={{ width: 130 }}>Round</th>
             <th style={{ width: 200 }}>How it went</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.id} style={{ opacity: row.status === "cancelled" ? 0.5 : 1 }}>
-              <td>
-                <b className="mono">{row.when.time}</b>
-                <div className="muted" style={{ fontSize: 11 }}>
-                  {row.when.label.split(" · ")[0]}
-                </div>
-              </td>
-              {showProfile && (
+            <React.Fragment key={row.id}>
+              <tr style={{ opacity: row.status === "cancelled" ? 0.5 : 1 }}>
                 <td>
-                  <b>{row.profile}</b>
-                  {row.developer && (
-                    <div className="muted" style={{ fontSize: 11 }}>{row.developer}</div>
+                  <b className="mono">{row.when.time}</b>
+                  <div className="muted" style={{ fontSize: 11 }}>
+                    {row.when.label.split(" · ")[0]}
+                  </div>
+                </td>
+                {showProfile && (
+                  <td>
+                    <b>{row.profile}</b>
+                    {row.developer && (
+                      <div className="muted" style={{ fontSize: 11 }}>{row.developer}</div>
+                    )}
+                  </td>
+                )}
+                <td>{row.client || <span className="muted">—</span>}</td>
+                <td className="truncate">{row.role || <span className="muted">—</span>}</td>
+                <td className="muted">
+                  {MODE_LABELS[row.mode] || row.mode}
+                  <div style={{ fontSize: 11 }}>{row.duration_minutes} min</div>
+                </td>
+                <td>
+                  {onChange ? (
+                    <select value={row.stage || "screening"}
+                            onChange={(e) => onChange(row.id, { stage: e.target.value })}>
+                      {Object.entries(STAGE_LABELS).map(([key, label]) => (
+                        <option key={key} value={key}>{label}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="muted">
+                      {STAGE_LABELS[row.stage] || row.stage || "—"}
+                    </span>
                   )}
                 </td>
+                <td>
+                  {onChange ? (
+                    <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                      <select value={row.status}
+                              onChange={(e) => onChange(row.id, { status: e.target.value })}>
+                        <option value="scheduled">scheduled</option>
+                        <option value="done">happened</option>
+                        <option value="no_show">no show</option>
+                        <option value="cancelled">cancelled</option>
+                      </select>
+                      {(row.is_past || row.status === "done") && row.status !== "cancelled" && (
+                        <select value={row.outcome}
+                                onChange={(e) => onChange(row.id, { outcome: e.target.value })}>
+                          <option value="pending">not said yet</option>
+                          <option value="passed">next round</option>
+                          <option value="offer">offer</option>
+                          <option value="hired">hired</option>
+                          <option value="rejected">no</option>
+                        </select>
+                      )}
+                    </div>
+                  ) : (
+                    <span className={row.outcome === "rejected" ? "pill off"
+                      : ["offer", "hired", "passed"].includes(row.outcome) ? "pill on" : "pill"}>
+                      {row.status === "scheduled" ? "scheduled" : row.outcome}
+                    </span>
+                  )}
+                  {row.awaiting_outcome && (
+                    <div style={{ fontSize: 11, color: "var(--brick)" }}>
+                      it happened — nobody has said how it went
+                    </div>
+                  )}
+                  {row.reported_by && (
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      {row.reported_by} reported it{row.reported_at ? ` · ${row.reported_at}` : ""}
+                    </div>
+                  )}
+                </td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  {safeLink(row.link) && (
+                    <a href={safeLink(row.link)} target="_blank" rel="noreferrer noopener">open</a>
+                  )}
+                  <button className="link"
+                          onClick={() => setOpen(open === row.id ? null : row.id)}>
+                    {open === row.id ? "close" : row.debrief ? "notes ✓" : "notes"}
+                  </button>
+                  {onRemove && <button className="link" onClick={() => onRemove(row)}>remove</button>}
+                </td>
+              </tr>
+              {open === row.id && (
+                <tr>
+                  <td colSpan={columns}>
+                    <InterviewNotes row={row} canBook={canBook} onChange={onChange}
+                                    onClose={() => setOpen(null)} />
+                  </td>
+                </tr>
               )}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** The two halves of an interview that are prose rather than a dropdown.
+ *
+ * The brief is the BD's, written when they booked it. The debrief is the
+ * developer's, written after the call. Separate fields on purpose: one typed
+ * over the other loses what the client actually asked for, and there is no
+ * second copy of that anywhere.
+ *
+ * Both sides may write the debrief — a BD who took it over the phone should
+ * not have to wait for the developer to sign in — but only the BD may touch
+ * the brief, because only they were on the thread with the client.
+ */
+function InterviewNotes({ row, canBook, onChange, onClose }) {
+  const [draft, setDraft] = React.useState(row.debrief || "");
+  const [saving, setSaving] = React.useState(false);
+  const dirty = draft.trim() !== (row.debrief || "").trim();
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onChange(row.id, { debrief: draft.trim() });
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="stack" style={{ gap: 10, padding: "10px 2px" }}>
+      <div>
+        <label>What the BD wrote when they booked it</label>
+        <p className="muted" style={{ marginTop: 3, maxWidth: 720 }}>
+          {row.notes || "Nothing was written down."}
+        </p>
+      </div>
+
+      <div>
+        <label htmlFor={`debrief-${row.id}`}>How the call went</label>
+        <p className="muted" style={{ margin: "3px 0 5px", maxWidth: 720 }}>
+          {canBook
+            ? "Whoever was in the room usually writes this. It shows on their screen and yours."
+            : "You were on the call, so this is the part only you can answer. It reaches your BD the moment you save it — nothing is emailed."}
+        </p>
+        {onChange ? (
+          <textarea id={`debrief-${row.id}`} rows={3} style={{ width: "100%" }}
+                    placeholder="Went well. They are sending a take-home by Friday."
+                    value={draft} onChange={(e) => setDraft(e.target.value)} />
+        ) : (
+          <p className="muted">{row.debrief || "Nothing recorded yet."}</p>
+        )}
+      </div>
+
+      {onChange && (
+        <div className="row" style={{ gap: 10 }}>
+          <button onClick={save} disabled={saving || !dirty}>
+            {saving ? "Saving…" : "Save the note"}
+          </button>
+          <button className="ghost" onClick={onClose}>Close</button>
+          <span className="muted">
+            {row.reported_by
+              ? `Last reported by ${row.reported_by}${row.reported_at ? ` · ${row.reported_at}` : ""}.`
+              : "Nobody has reported on this one yet."}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Replies with no time on them yet.
+ *
+ * Its own table rather than a row in the diary, because these have no time to
+ * be sorted by and nothing to turn up to. What they need is one field — the
+ * time — and putting it in is what turns the row into a real booking. There is
+ * deliberately no confirm step after it: agreeing the time *is* the
+ * confirmation, and a second button is one somebody forgets, leaving a real
+ * interview counted nowhere.
+ */
+export function WaitingOnTime({ rows, onChange, onRemove, suggested }) {
+  const [draft, setDraft] = React.useState({});
+  if (!rows?.length) return null;
+
+  const put = async (row) => {
+    const when = draft[row.id] || suggested;
+    if (!when) return;
+    await onChange(row.id, { scheduled_at: when });
+    setDraft((all) => {
+      const next = { ...all };
+      delete next[row.id];
+      return next;
+    });
+  };
+
+  return (
+    <div className="card scroll">
+      <table className="board">
+        <thead>
+          <tr>
+            <th>Client</th>
+            <th>Role</th>
+            <th>Applied as</th>
+            <th style={{ width: 130 }}>Round</th>
+            <th style={{ width: 230 }}>Time · ET</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
               <td>{row.client || <span className="muted">—</span>}</td>
-              <td className="truncate">{row.role || <span className="muted">—</span>}</td>
-              <td className="muted">
-                {MODE_LABELS[row.mode] || row.mode}
-                <div style={{ fontSize: 11 }}>{row.duration_minutes} min</div>
+              <td className="truncate" style={{ maxWidth: 260 }}>
+                {row.role || <span className="muted">—</span>}
+                {row.job && safeLink(row.job.description_url) && (
+                  <div style={{ fontSize: 11 }}>
+                    <a href={safeLink(row.job.description_url)} target="_blank"
+                       rel="noreferrer noopener">the posting</a>
+                  </div>
+                )}
               </td>
               <td>
-                {onChange ? (
-                  <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
-                    <select value={row.status}
-                            onChange={(e) => onChange(row.id, { status: e.target.value })}>
-                      <option value="scheduled">scheduled</option>
-                      <option value="done">happened</option>
-                      <option value="no_show">no show</option>
-                      <option value="cancelled">cancelled</option>
-                    </select>
-                    {(row.is_past || row.status === "done") && row.status !== "cancelled" && (
-                      <select value={row.outcome}
-                              onChange={(e) => onChange(row.id, { outcome: e.target.value })}>
-                        <option value="pending">not said yet</option>
-                        <option value="passed">next round</option>
-                        <option value="offer">offer</option>
-                        <option value="hired">hired</option>
-                        <option value="rejected">no</option>
-                      </select>
-                    )}
-                  </div>
-                ) : (
-                  <span className={row.outcome === "rejected" ? "pill off"
-                    : ["offer", "hired", "passed"].includes(row.outcome) ? "pill on" : "pill"}>
-                    {row.status === "scheduled" ? "scheduled" : row.outcome}
-                  </span>
-                )}
-                {row.awaiting_outcome && (
-                  <div style={{ fontSize: 11, color: "var(--brick)" }}>
-                    it happened — nobody has said how it went
-                  </div>
+                <b>{row.profile}</b>
+                {row.developer && (
+                  <div className="muted" style={{ fontSize: 11 }}>{row.developer}</div>
                 )}
               </td>
+              <td>
+                <select value={row.stage || "screening"}
+                        onChange={(e) => onChange(row.id, { stage: e.target.value })}>
+                  {Object.entries(STAGE_LABELS).map(([key, label]) => (
+                    <option key={key} value={key}>{label}</option>
+                  ))}
+                </select>
+              </td>
+              <td>
+                <input type="datetime-local" style={{ width: "100%" }}
+                       value={draft[row.id] ?? suggested ?? ""}
+                       onChange={(e) => setDraft((all) => ({ ...all, [row.id]: e.target.value }))} />
+              </td>
               <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                {safeLink(row.link) && (
-                  <a href={safeLink(row.link)} target="_blank" rel="noreferrer noopener">open</a>
-                )}
+                <button onClick={() => put(row)}>Book it</button>
                 {onRemove && <button className="link" onClick={() => onRemove(row)}>remove</button>}
               </td>
             </tr>
@@ -437,6 +647,62 @@ export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
     </div>
   );
 }
+
+
+/** How many conversations reached each rung, and how many died there.
+ *
+ * The thing a single interviews-to-offers percentage cannot show. A team losing
+ * everybody at the technical round has a tooling problem; one losing them at
+ * the final round has a rate or an availability problem. Both look identical in
+ * one number, and they call for opposite fixes.
+ */
+export function StageLadder({ rows }) {
+  if (!rows?.length) return null;
+  const widest = Math.max(...rows.map((row) => row.reached), 1);
+  if (!rows.some((row) => row.reached)) return null;
+
+  return (
+    <section className="card pad stack" style={{ gap: 10 }}>
+      <div>
+        <h3>Where the conversations get to</h3>
+        <p className="muted" style={{ marginTop: 3, maxWidth: 760 }}>
+          Reached each round, and what happened there. Cleared went on to the next one; lost
+          ended there. The two do not add up to the total, because the rest are still open.
+        </p>
+      </div>
+      <div className="stack" style={{ gap: 7 }}>
+        {rows.map((row) => (
+          <div key={row.stage} className="row" style={{ gap: 10, alignItems: "center" }}>
+            <span style={{ minWidth: 110, fontSize: 12 }}>
+              {STAGE_LABELS[row.stage] || row.stage}
+            </span>
+            <span className="mono" style={{ minWidth: 28, textAlign: "right" }}>
+              {row.reached}
+            </span>
+            <span style={{ flex: 1, display: "flex", height: 12, gap: 2 }}>
+              <span style={{
+                width: `${(row.cleared / widest) * 100}%`,
+                background: "var(--pine)", borderRadius: 2,
+              }} title={`${row.cleared} went on`} />
+              <span style={{
+                width: `${(row.lost / widest) * 100}%`,
+                background: "var(--brick)", borderRadius: 2,
+              }} title={`${row.lost} ended here`} />
+              <span style={{
+                width: `${((row.reached - row.cleared - row.lost) / widest) * 100}%`,
+                background: "var(--line, #d8d3c8)", borderRadius: 2,
+              }} title={`${row.reached - row.cleared - row.lost} still open`} />
+            </span>
+            <span className="muted" style={{ minWidth: 96, fontSize: 11, textAlign: "right" }}>
+              {row.reached ? `${row.rate}% went on` : "—"}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 
 /** Every developer, and whether they are free. The manager's version. */
 export function DeveloperBoard({ rows, onOpen }) {

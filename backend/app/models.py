@@ -52,10 +52,29 @@ ROLES = ("admin", "bd", "dev")
 AVAILABILITY = ("open", "limited", "booked")
 
 INTERVIEW_MODES = ("video", "call", "onsite", "async")
-INTERVIEW_STATUSES = ("scheduled", "done", "cancelled", "no_show")
+# `draft` is a conversation that exists without a time yet. A client replies,
+# whoever read the email finds the job in the record and starts an interview
+# from it there and then — the title, the client and the link come across
+# straight away, and the time follows once it is agreed. Everything else about
+# a draft behaves as if it were not there: it is in no rate, no funnel and no
+# count of what is coming, because none of that is true of it yet.
+INTERVIEW_STATUSES = ("draft", "scheduled", "done", "cancelled", "no_show")
 # `passed` is a round cleared, not the end of it. Both `offer` and `hired`
 # count as an offer; only `hired` counts as work actually won.
 INTERVIEW_OUTCOMES = ("pending", "passed", "offer", "hired", "rejected")
+
+# The ladder a job climbs. Ordered, and the order is the product: a screening
+# call and a final round are not the same event and a team that cannot tell
+# them apart cannot see where its conversations die. `assessment` is a rung
+# rather than something beside the ladder, because a take-home is a stage a
+# candidate is at — the client is not talking to anybody else while it is out.
+INTERVIEW_STAGES = ("screening", "technical", "assessment", "final", "offer")
+
+# A take-home, a test, a written exercise. The BD sets it because the client
+# sent it to them; the developer does it because they are the one who can.
+ASSESSMENT_STATUSES = ("sent", "in_progress", "submitted", "passed", "failed")
+# Only these say the assessment is finished with.
+ASSESSMENT_CLOSED = ("submitted", "passed", "failed")
 
 
 # The team works to Eastern time, so that is what "applied on" means. Stored
@@ -289,6 +308,12 @@ class Job(Base):
     company_key = Column(String(300), index=True)
     platform = Column(String(120))
     url = Column(Text)
+    # Where the posting itself is written out, when that is somewhere other
+    # than the apply link. A BD reading a client's reply three weeks later
+    # needs the wording that was applied to, and the apply link is usually
+    # dead by then — an expired posting redirects to a board's home page and
+    # takes the description with it.
+    description_url = Column(Text, nullable=False, default="")
     first_seen = Column(DateTime, default=utcnow)
 
 
@@ -360,6 +385,14 @@ class Interview(Base):
     else does: the client is talking to "Khuram, AI Engineer". Who that is, and
     whose calendar it lands in, is `profiles.dev_user_id` and may change.
 
+    Two people write to this row and they write different halves of it. The BD
+    runs the account the client replied to, so booking it is theirs: the time,
+    the client, the link, the brief. The developer is the one who was in the
+    room, so what came of it is theirs: the status, the outcome, the debrief.
+    Neither half is guesswork for the person who owns it and neither is
+    first-hand for the person who does not, which is why the split is enforced
+    on the server rather than left to whoever opens the form first.
+
     `job_id` is set when the interview came from a posting the system already
     knows about and left empty when it did not — plenty of replies arrive weeks
     later, or through a channel the sheets never saw. `client` and `role` are
@@ -380,8 +413,25 @@ class Interview(Base):
     mode = Column(String(16), nullable=False, default="video")
     link = Column(Text, nullable=False, default="")
     status = Column(String(16), nullable=False, default="scheduled")
+    # Where on the ladder this sitting is. Kept on the interview rather than on
+    # the job, because one job produces several of them and each is at a
+    # different rung — that progression is the thing worth seeing.
+    stage = Column(String(16), nullable=False, default="screening")
     outcome = Column(String(16), nullable=False, default="pending")
+    # The BD's brief, written when the interview is booked: what the client
+    # asked for, what to lead with. It belongs to whoever runs the account.
     notes = Column(Text, nullable=False, default="")
+    # The developer's account of it afterwards. A separate field rather than
+    # more text in `notes`, because they are written by different people at
+    # different times and one must not overwrite the other — a debrief typed
+    # over the top of the brief loses what the BD asked for, and there is no
+    # copy of it anywhere else.
+    debrief = Column(Text, nullable=False, default="")
+    # Who said how it went, and when. The outcome is the only figure in this
+    # product that cannot be improved by typing faster, so it is worth knowing
+    # whose word it is — usually the developer who was in the room.
+    reported_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reported_at = Column(DateTime, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
@@ -390,4 +440,59 @@ class Interview(Base):
         # Every screen asks the same question — what is next for this profile —
         # so the index answers it in the order the screens want it.
         Index("ix_interview_profile_time", "profile_id", "scheduled_at"),
+    )
+
+
+class Assessment(Base):
+    """A take-home, a test, a written exercise. Set by the BD, done by the dev.
+
+    Its own table rather than a field on an interview, because a client can
+    send a test before anybody has spoken — plenty of boards screen that way
+    round — and an assessment that could only exist under an interview would
+    force somebody to invent a call that never happened to record it.
+
+    `interview_id` is the optional link back to the conversation that produced
+    it, which is the common case and is what puts it on that interview's row.
+    `job_id` is the posting it came from, when the system knows it. Both may be
+    empty; `profile_id` never is, because an assessment is always work somebody
+    is being asked to do under one identity.
+
+    The split of who writes what mirrors the interview exactly. The BD sets it
+    — the client sent them the brief, the link and the deadline. The developer
+    answers it: how far along they are, what they submitted, and what they want
+    their BD to know. Neither half is guesswork for its owner.
+    """
+    __tablename__ = "assessments"
+    id = Column(Integer, primary_key=True)
+    profile_id = Column(Integer, ForeignKey("profiles.id", ondelete="CASCADE"),
+                        nullable=False, index=True)
+    interview_id = Column(Integer, ForeignKey("interviews.id", ondelete="SET NULL"),
+                          nullable=True, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=True, index=True)
+
+    # The BD's half.
+    title = Column(String(300), nullable=False, default="")
+    client = Column(String(300), nullable=False, default="")
+    brief = Column(Text, nullable=False, default="")
+    link = Column(Text, nullable=False, default="")
+    # UTC like everything else. Nullable, because plenty of clients send a test
+    # with no deadline at all and inventing one would put a false red flag on
+    # somebody's screen.
+    due_at = Column(DateTime, nullable=True, index=True)
+
+    # The developer's half.
+    status = Column(String(16), nullable=False, default="sent")
+    submission_url = Column(Text, nullable=False, default="")
+    notes = Column(Text, nullable=False, default="")
+    submitted_at = Column(DateTime, nullable=True)
+
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        # What every screen asks: what is outstanding for this identity, soonest
+        # deadline first.
+        Index("ix_assessment_profile_due", "profile_id", "due_at"),
     )

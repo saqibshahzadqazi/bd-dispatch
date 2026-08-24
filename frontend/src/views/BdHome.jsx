@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, download, safeUrl } from "../api.js";
+import Assessments from "./Assessments.jsx";
 import EntryTable from "./EntryTable.jsx";
 import Interviews from "./Interviews.jsx";
+import JobRecord from "./JobRecord.jsx";
 import { Availability, CopyButton, Skills } from "./widgets.jsx";
 
 const FIELD_LABELS = {
@@ -22,8 +24,10 @@ export default function BdHome() {
   const [note, setNote] = useState(null);
   const [busy, setBusy] = useState(false);
   const [hot, setHot] = useState(false);
-  const [tab, setTab] = useState("applied");   // applied | new | interviews
+  // applied | new | record | interviews | assessments
+  const [tab, setTab] = useState("applied");
   const [diary, setDiary] = useState(null);   // interview counts, for the badge
+  const [tests, setTests] = useState(null);   // assessment counts, for the badge
   const [how, setHow] = useState("type");      // type | upload
   const fileInput = useRef(null);
 
@@ -82,7 +86,10 @@ export default function BdHome() {
   // developer themselves, or a colleague who took the call. The badge is the
   // only thing on this screen that has to be right within the hour.
   useEffect(() => {
-    const pull = () => api.interviews().then((d) => setDiary(d.counts)).catch(() => {});
+    const pull = () => {
+      api.interviews().then((d) => setDiary(d.counts)).catch(() => {});
+      api.assessments().then((d) => setTests(d.counts)).catch(() => {});
+    };
     pull();
     const tick = setInterval(pull, 60000);
     return () => clearInterval(tick);
@@ -127,7 +134,12 @@ export default function BdHome() {
   const mark = async (assignmentId, status) => {
     setSheets((all) => ({
       ...all,
-      [profileId]: (all[profileId] || []).map((r) => (r.id === assignmentId ? { ...r, status } : r)),
+      // Skipping retires the job from this profile for good, so the row leaves
+      // the list at once. Leaving it sitting there greyed out until the next
+      // poll reads as a change that did not save.
+      [profileId]: (all[profileId] || [])
+        .filter((r) => !(r.id === assignmentId && status === "skipped"))
+        .map((r) => (r.id === assignmentId ? { ...r, status } : r)),
     }));
     try {
       await api.setStatus(assignmentId, status);
@@ -202,8 +214,11 @@ export default function BdHome() {
               <h3>Who you are applying as</h3>
               <p className="muted" style={{ marginTop: 3, maxWidth: 680 }}>
                 {profile.developer
-                  ? <>Behind <b>{profile.name}</b> is <b>{profile.developer}</b>. They sit the
-                      interview, so anything you book lands on their screen.</>
+                  ? <>Behind <b>{profile.name}</b> is <b>{profile.developer}</b>. You hold this
+                      profile's whole record — what it applied to, what came back, and where each
+                      of those stands — so when a client replies, booking the interview is yours.
+                      It lands on {profile.developer}&apos;s screen, and what they say afterwards
+                      comes back here.</>
                   : <>Nobody is attached to <b>{profile.name}</b> yet, so an interview booked
                       against it reaches no one. Ask your manager to say who is behind it.</>}
               </p>
@@ -256,6 +271,24 @@ export default function BdHome() {
         </section>
       )}
 
+      {diary?.awaiting_time > 0 && (
+        <div className="notice gate">
+          <b>{diary.awaiting_time} {diary.awaiting_time === 1 ? "reply is" : "replies are"} waiting
+          on a time.</b>{" "}
+          Started from the record and not yet booked, so nobody has anything to turn up to.{" "}
+          <button className="link" onClick={() => setTab("interviews")}>Give them a time</button>
+        </div>
+      )}
+
+      {tests?.overdue > 0 && (
+        <div className="notice">
+          <b>{tests.overdue} assessment{tests.overdue === 1 ? " is" : "s are"} past the
+          deadline.</b>{" "}
+          A missed take-home costs the interview that earned it.{" "}
+          <button className="link" onClick={() => setTab("assessments")}>Open them</button>
+        </div>
+      )}
+
       {diary?.today > 0 && (
         <div className="notice gate">
           <b>{diary.today} interview{diary.today === 1 ? "" : "s"} today</b> against the profiles
@@ -268,9 +301,10 @@ export default function BdHome() {
         <div className="notice">
           <b>{diary.awaiting_outcome} interview
           {diary.awaiting_outcome === 1 ? " has" : "s have"} happened with no outcome recorded.</b>{" "}
-          Until somebody says how they went, nothing here can tell you whether the applications
-          are working.{" "}
-          <button className="link" onClick={() => setTab("interviews")}>Record them</button>
+          The developer was the one in the room, so it is usually theirs to answer — but nothing
+          here can tell you whether the applications are working until somebody does, and you can
+          record it yourself if they told you over the phone.{" "}
+          <button className="link" onClick={() => setTab("interviews")}>Open the diary</button>
         </div>
       )}
 
@@ -288,19 +322,42 @@ export default function BdHome() {
             <button className={tab === "new" ? "" : "ghost"} onClick={() => setTab("new")}>
               New jobs for {profile?.name}{sheet.length ? ` (${sheet.length})` : ""}
             </button>
+            <button className={tab === "record" ? "" : "ghost"} onClick={() => setTab("record")}>
+              All jobs
+            </button>
             <button className={tab === "interviews" ? "" : "ghost"} onClick={() => setTab("interviews")}>
-              Interviews{diary?.today ? ` (${diary.today} today)`
-                : diary?.scheduled ? ` (${diary.scheduled})` : ""}
+              Interviews{diary?.awaiting_time ? ` (${diary.awaiting_time} waiting)`
+                : diary?.today ? ` (${diary.today} today)`
+                  : diary?.scheduled ? ` (${diary.scheduled})` : ""}
+            </button>
+            <button className={tab === "assessments" ? "" : "ghost"} onClick={() => setTab("assessments")}>
+              Assessments{tests?.open ? ` (${tests.open})` : ""}
             </button>
           </div>
+
+          {tab === "record" && (
+            <JobRecord profiles={profiles} onOpenInterviews={() => setTab("interviews")} />
+          )}
+
+          {tab === "assessments" && (
+            <Assessments
+              profiles={profiles}
+              heading="Assessments"
+              intro="Take-homes and tests, across every profile you run. You set them because the
+                     client sent them to you; the developer does them and says how it went. Both
+                     of you can see everything on this screen."
+            />
+          )}
 
           {tab === "interviews" && (
             <Interviews
               profiles={profiles}
               heading="Interviews"
-              intro="Every reply that turned into a conversation, for the profiles you run. Logging
-                     one puts it on the developer's screen — nothing is emailed, and nobody has to
-                     be told."
+              intro="Every reply that turned into a conversation, across every profile you run.
+                     When a client answers, booking it is yours — you run the account they
+                     replied to. Logging one puts it on the developer's screen; nothing is
+                     emailed and nobody has to be told. What they say about the call afterwards
+                     comes back onto this same row, under notes."
               showFunnel
             />
           )}
@@ -446,19 +503,43 @@ export default function BdHome() {
                     <table>
                       <thead>
                         <tr>
-                          <th>Job</th><th>Client</th><th>Platform</th><th>Link</th><th>Status</th>
+                          <th>Job</th><th>Client</th><th>Found by</th><th>Platform</th>
+                          <th style={{ minWidth: 220 }}>Link</th><th>Status</th>
                         </tr>
                       </thead>
                       <tbody>
                         {sheet.map((job) => (
-                          <tr key={job.id} style={{ opacity: job.status === "skipped" ? 0.5 : 1 }}>
+                          <tr key={job.id}>
                             <td className="truncate">{job.title || "—"}</td>
                             <td>{job.company || "—"}</td>
+                            <td>
+                              {job.found_by?.length ? (
+                                <span className="pill" title={
+                                  `Already applied to by ${job.found_by.join(", ")}. `
+                                  + "That is why it is on this list."}>
+                                  {job.found_by.join(", ")}
+                                </span>
+                              ) : <span className="muted">—</span>}
+                            </td>
                             <td className="muted">{job.platform || "—"}</td>
-                            <td className="truncate">
-                              {safeUrl(job.url)
-                                ? <a href={safeUrl(job.url)} target="_blank" rel="noreferrer noopener">open</a>
-                                : <span className="muted">no link</span>}
+                            <td>
+                              {/* The link itself, not the word "open" over the top of it.
+                                  A BD decides whether a posting is worth their time from
+                                  the host and the slug as often as from the title. */}
+                              {safeUrl(job.url) ? (
+                                <a className="truncate" style={{ display: "block", maxWidth: 300 }}
+                                   href={safeUrl(job.url)} title={job.url}
+                                   target="_blank" rel="noreferrer noopener">
+                                  {job.url.replace(/^https?:\/\/(www\.)?/i, "")}
+                                </a>
+                              ) : <span className="muted">no link</span>}
+                              {safeUrl(job.description_url) && (
+                                <a href={safeUrl(job.description_url)} title={job.description_url}
+                                   style={{ fontSize: 11 }}
+                                   target="_blank" rel="noreferrer noopener">
+                                  the full description
+                                </a>
+                              )}
                             </td>
                             <td>
                               <select value={job.status} onChange={(e) => mark(job.id, e.target.value)}>
@@ -474,7 +555,9 @@ export default function BdHome() {
                   </div>
                   <p className="muted">
                     Anything left as <b>to do</b> comes back next cycle. Marking a job
-                    <b> applied</b> or <b> skipped</b> retires it from this profile for good.
+                    <b> applied</b> or <b> skipped</b> retires it from this profile for good, and
+                    a skipped one leaves this list the moment you set it — it is never offered to
+                    {" "}{profile?.name} again.
                     {batch.status === "open" && batch.auto_build_minutes > 0 && (
                       <> This list refreshes every {batch.auto_build_minutes} minutes as
                       colleagues log their work, so jobs may drop off — anything you have already

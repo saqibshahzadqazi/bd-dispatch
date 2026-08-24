@@ -25,12 +25,13 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import create_engine, delete, func, insert, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from . import dashboard, exports, ingest, interviews, matching
-from .models import (AVAILABILITY, COVER, INTERVIEW_MODES, INTERVIEW_OUTCOMES,
-                     INTERVIEW_STATUSES, MODES, ROLES, SPLIT, Application,
-                     Assignment, Base, Batch, BatchApplication, Interview, Job,
-                     Profile, Setting, Upload, User, applied_stamp,
-                     from_working, utcnow, working_label)
+from . import assessments, dashboard, exports, ingest, interviews, matching
+from .models import (ASSESSMENT_CLOSED, ASSESSMENT_STATUSES, AVAILABILITY,
+                     COVER, INTERVIEW_MODES, INTERVIEW_OUTCOMES,
+                     INTERVIEW_STAGES, INTERVIEW_STATUSES, MODES, ROLES, SPLIT,
+                     Application, Assessment, Assignment, Base, Batch,
+                     BatchApplication, Interview, Job, Profile, Setting, Upload,
+                     User, applied_stamp, from_working, utcnow, working_label)
 from .schema import bring_up_to_date
 
 def _database_url() -> str:
@@ -319,17 +320,24 @@ class InterviewIn(BaseModel):
     profile_id: int
     # "2026-08-24T14:30", read as the clock the team works to. See
     # models.from_working — the browser never decides what that means.
-    scheduled_at: str
+    #
+    # Optional, because an interview can be started from the job record the
+    # moment a client's email arrives, before any time has been agreed. That
+    # one is a draft: it holds the client, the role and the links, counts
+    # towards nothing, and becomes real when somebody puts a time on it.
+    scheduled_at: Optional[str] = None
     client: str = ""
     role: str = ""
     mode: str = "video"
     duration_minutes: int = 30
     link: str = ""
     notes: str = ""
+    stage: str = "screening"
     job_id: Optional[int] = None
 
 
 class InterviewPatch(BaseModel):
+    # The BD's half: when it is, who it is with, what to lead with.
     scheduled_at: Optional[str] = None
     client: Optional[str] = None
     role: Optional[str] = None
@@ -337,8 +345,38 @@ class InterviewPatch(BaseModel):
     duration_minutes: Optional[int] = None
     link: Optional[str] = None
     notes: Optional[str] = None
+    # What happened, and where on the ladder it sits.
     status: Optional[str] = None
+    stage: Optional[str] = None
     outcome: Optional[str] = None
+    debrief: Optional[str] = None
+
+
+class AssessmentIn(BaseModel):
+    profile_id: int
+    title: str = ""
+    client: str = ""
+    brief: str = ""
+    link: str = ""
+    # "2026-08-27T17:00" on the team's clock, or empty. Plenty of clients send
+    # a test with no deadline at all, and inventing one puts a false red flag
+    # on somebody's screen.
+    due_at: str = ""
+    interview_id: Optional[int] = None
+    job_id: Optional[int] = None
+
+
+class AssessmentPatch(BaseModel):
+    # The BD's half.
+    title: Optional[str] = None
+    client: Optional[str] = None
+    brief: Optional[str] = None
+    link: Optional[str] = None
+    due_at: Optional[str] = None
+    # The developer's half.
+    status: Optional[str] = None
+    submission_url: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class SettingsIn(BaseModel):
@@ -363,6 +401,7 @@ class EntryIn(BaseModel):
     company: str = ""
     platform: str = ""
     date: str = ""
+    description_url: str = ""
 
 
 class EntriesIn(BaseModel):
@@ -744,7 +783,8 @@ def set_mapping(upload_id: int, body: MappingIn, db: Session = Depends(get_db),
 # mapping is then the identity, so hand-entered and uploaded sheets travel
 # through exactly the same code from here on.
 TYPED_HEADERS = {"url": "Job link", "title": "Job title", "company": "Client",
-                 "platform": "Platform", "date": "Applied on"}
+                 "platform": "Platform", "date": "Applied on",
+                 "description_url": "Job description link"}
 
 
 @app.get("/api/batches/{batch_id}/profiles/{profile_id}/entries")
@@ -784,7 +824,8 @@ def save_entries(batch_id: int, profile_id: int, body: EntriesIn,
     for entry in body.rows:
         record = {"url": ingest.safe_url(entry.url), "title": entry.title.strip(),
                   "company": entry.company.strip(), "platform": entry.platform.strip(),
-                  "date": entry.date.strip()}
+                  "date": entry.date.strip(),
+                  "description_url": ingest.safe_url(entry.description_url)}
         # Judge on the fields that identify a job. The timestamp is stamped for
         # the user the moment they add a row, so every untouched row carries one
         # — counting it would file a blank row as work.
@@ -891,12 +932,16 @@ def build_lists(db: Session, batch: Batch) -> dict:
             job = Job(fingerprint=fp, tier=record["tier"], title=record["title"][:500],
                       company=record["company"][:300],
                       company_key=matching.normalize_text(record["company"])[:300],
-                      platform=record["platform"][:120], url=record["url"])
+                      platform=record["platform"][:120], url=record["url"],
+                      description_url=record.get("description_url") or "")
             fresh.append(job)
         else:
             job.title = job.title or record["title"][:500]
             job.company = job.company or record["company"][:300]
             job.url = job.url or record["url"]
+            # One colleague recording the description link is enough for
+            # everybody: the job is one row and they all read it.
+            job.description_url = job.description_url or (record.get("description_url") or "")
         seen[fp] = job
     if fresh:
         db.add_all(fresh)
@@ -937,7 +982,28 @@ def build_lists(db: Session, batch: Batch) -> dict:
         db.execute(insert(BatchApplication), this_cycle)
     db.flush()
 
-    participants = sorted({u.profile_id for u in uploads if u.profile_id})
+    handed_in = sorted({u.profile_id for u in uploads if u.profile_id})
+
+    # A cycle is open, two profiles have reported in, and a third selling the
+    # same skills has logged nothing yet — because they are new, or were away,
+    # or simply have not got to it. Leaving them out means the profile with the
+    # most spare capacity is the one handed no work, which is backwards.
+    #
+    # They join as recipients only. Nothing of theirs is in the pool, because
+    # they contributed nothing to it, and their own history still blocks
+    # anything they have already applied to — a late joiner is given jobs, not
+    # given away.
+    all_profiles = {p.id: p for p in db.scalars(
+        select(Profile).where(Profile.is_active == True)).all()}  # noqa: E712
+    joined: list[int] = []
+    if handed_in:
+        joined = matching.similar_profiles(
+            [{"id": pid, "skills": all_profiles[pid].skills}
+             for pid in handed_in if pid in all_profiles],
+            [{"id": pid, "skills": profile.skills}
+             for pid, profile in all_profiles.items() if pid not in handed_in])
+
+    participants = sorted(set(handed_in) | set(joined))
 
     # 4. Anything still sitting unworked on a participant's list from an earlier
     #    cycle comes back into the pool. A job someone simply ran out of time
@@ -982,6 +1048,7 @@ def build_lists(db: Session, batch: Batch) -> dict:
 
     place = matching.cover if batch.mode == COVER else matching.partition
     assigned, stats = place(pool, participants, batch.quota, batch.one_per_client)
+    stats["joined_on_skills"] = len(joined)
 
     # Only the untouched rows are replaced. A job somebody has already marked
     # applied or skipped is their record of this cycle's work, and rebuilding —
@@ -1036,6 +1103,9 @@ def build_lists(db: Session, batch: Batch) -> dict:
         "Jobs held back by the quota": stats["held_back_quota"],
         "Jobs put on a list": reached,
         "Places on lists": stats["placements"],
+        # Profiles that handed nothing in and were given the pool anyway,
+        # because they sell the same skills as somebody who did.
+        "Profiles pulled in on skills": stats.get("joined_on_skills", 0),
     }
     # Building no longer closes the cycle. People keep logging jobs into an open
     # cycle and the timer keeps the lists current; closing it is a separate act.
@@ -1226,22 +1296,66 @@ def report(batch_id: int, db: Session = Depends(get_db), _: User = Depends(admin
 # Assignments
 # --------------------------------------------------------------------------- #
 
-def _row_json(a: Assignment, j: Job) -> dict:
-    return {"id": a.id, "status": a.status, "title": j.title, "company": j.company,
-            "platform": j.platform, "url": j.url}
+def _row_json(a: Assignment, j: Job, found_by: Optional[list[str]] = None) -> dict:
+    return {"id": a.id, "job_id": j.id, "status": a.status, "title": j.title,
+            "company": j.company, "platform": j.platform, "url": j.url,
+            "description_url": j.description_url or "",
+            # Which profiles already applied to this one. It is why the job is
+            # on this list at all — somebody else found it — and a BD reading
+            # "found by Faizan" knows whose search to ask about when a whole
+            # run of them is wrong for this profile.
+            "found_by": found_by or []}
+
+
+def _found_by(db: Session, job_ids: Iterable[int],
+              exclude: Optional[int] = None) -> dict[int, list[str]]:
+    """Which profiles have already applied to each of these jobs.
+
+    One query for the whole list rather than one per row. `exclude` drops the
+    profile being shown the list — it is on there precisely because that
+    profile has *not* applied, so naming it would be nonsense.
+    """
+    ids = [job_id for job_id in job_ids]
+    if not ids:
+        return {}
+    out: dict[int, list[str]] = defaultdict(list)
+    for chunk in _chunks(ids):
+        for job_id, name, profile_id in db.execute(
+            select(Application.job_id, Profile.name, Profile.id)
+            .join(Profile, Profile.id == Application.profile_id)
+            .where(Application.job_id.in_(chunk))
+            .order_by(Profile.name)
+        ).all():
+            if profile_id != exclude:
+                out[job_id].append(name)
+    return out
 
 
 def _assignment_rows(db: Session, batch_id: int, profile_id: int) -> list[dict]:
+    """One profile's list for one cycle.
+
+    Skipped jobs are left out entirely. A profile that skipped a job has said
+    it is not for them, and it never comes back in a later cycle either — so
+    leaving it on screen greyed out is a row that can only ever be scrolled
+    past. What stays is what there is still something to do about.
+    """
     rows = db.execute(
         select(Assignment, Job).join(Job, Job.id == Assignment.job_id)
-        .where(Assignment.batch_id == batch_id, Assignment.profile_id == profile_id)
+        .where(Assignment.batch_id == batch_id, Assignment.profile_id == profile_id,
+               Assignment.status != "skipped")
         .order_by(Job.company, Job.title)
     ).all()
-    return [_row_json(a, j) for a, j in rows]
+    sources = _found_by(db, [j.id for _, j in rows], exclude=profile_id)
+    return [_row_json(a, j, sources.get(j.id)) for a, j in rows]
 
 
 def _all_assignment_rows(db: Session, batch_id: int) -> dict[int, list[dict]]:
-    """Every profile's sheet in one pass, for the whole-batch workbook."""
+    """Every profile's sheet in one pass, for the whole-batch workbook.
+
+    Unlike the on-screen list this keeps the skipped rows. A download is the
+    record of what the cycle dispatched, and a manager auditing it needs to see
+    what was turned down as much as what was taken.
+    """
     rows = db.execute(
         select(Assignment, Job).join(Job, Job.id == Assignment.job_id)
         .where(Assignment.batch_id == batch_id)
@@ -1273,6 +1387,89 @@ def profile_sheet(batch_id: int, profile_id: int, db: Session = Depends(get_db),
     profile = owned_profile(profile_id, db, user)
     return {"batch_id": batch_id, "profile": profile_json(profile),
             "jobs": _assignment_rows(db, batch_id, profile.id)}
+
+
+# --------------------------------------------------------------------------- #
+# The record — every job a profile has ever applied to
+# --------------------------------------------------------------------------- #
+
+JOB_PAGE = 50
+
+
+@app.get("/api/jobs")
+def job_record(q: str = "", profile_id: Optional[int] = None, limit: int = JOB_PAGE,
+               offset: int = 0, db: Session = Depends(get_db),
+               user: User = Depends(current_user)):
+    """Everything applied for, all-time, newest first, searchable.
+
+    The screen a BD opens with a client's email still on the other monitor.
+    They paste in the company name or the job title, find the row, and start
+    the interview from it — which is what carries the title, the client and
+    both links onto the conversation instead of being typed again, wrong.
+
+    Not scoped to a cycle. A reply arrives three weeks after the application
+    that earned it, by which time that cycle is closed and, on the cycle-scoped
+    screens, gone. This one goes back to the beginning.
+
+    Search runs over the client, the title, the platform and the link, because
+    a person pasting out of an email has no idea which field the thing they
+    copied lives in. Case-insensitive, and matches anywhere in the value — a
+    leading-anchor search would miss "Northwind" inside "The Northwind Group".
+    """
+    ids = visible_profile_ids(db, user)
+    if profile_id is not None:
+        linked_profile(profile_id, db, user)
+        if ids is not None and profile_id not in ids:
+            raise HTTPException(403, "That profile belongs to someone else.")
+        ids = [profile_id]
+    if ids is not None and not ids:
+        return {"rows": [], "total": 0, "limit": limit, "offset": 0, "q": q}
+
+    limit = min(200, max(1, limit))
+    offset = max(0, offset)
+
+    query = (select(Application, Job, Profile)
+             .join(Job, Job.id == Application.job_id)
+             .join(Profile, Profile.id == Application.profile_id))
+    if ids is not None:
+        query = query.where(Application.profile_id.in_(ids))
+
+    needle = (q or "").strip()
+    if needle:
+        like = f"%{needle.lower()}%"
+        query = query.where(or_(
+            func.lower(func.coalesce(Job.company, "")).like(like),
+            func.lower(func.coalesce(Job.title, "")).like(like),
+            func.lower(func.coalesce(Job.platform, "")).like(like),
+            func.lower(func.coalesce(Job.url, "")).like(like),
+            func.lower(Profile.name).like(like),
+        ))
+
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = db.execute(
+        query.order_by(Application.created_at.desc(), Application.id.desc())
+        .limit(limit).offset(offset)
+    ).all()
+
+    return {
+        "rows": [{
+            "job_id": job.id,
+            "profile_id": profile.id,
+            "profile": profile.name,
+            "title": job.title or "",
+            "company": job.company or "",
+            "platform": job.platform or "",
+            "url": job.url or "",
+            "description_url": job.description_url or "",
+            # What the BD typed on their sheet, kept verbatim. The row's own
+            # created_at is when the cycle was built, which is a different day
+            # from the one they actually applied.
+            "applied_on": application.applied_on or "",
+            "logged": working_label(application.created_at)["label"]
+                      if application.created_at else "",
+        } for application, job, profile in rows],
+        "total": total, "limit": limit, "offset": offset, "q": needle,
+    }
 
 
 @app.patch("/api/assignments/{assignment_id}")
@@ -1522,24 +1719,50 @@ def create_interview(body: InterviewIn, db: Session = Depends(get_db),
                      user: User = Depends(current_user)):
     """Log a reply that turned into a conversation.
 
-    Usually the BD, who runs the account the client answered. Sometimes the
-    developer, who was the one emailed. Both may, because both find out first
-    about half the time, and the one who knows should not have to ask somebody
-    else to type it in.
+    Either side of the profile, and the manager. The BD runs the account most
+    replies arrive at and holds the record of what was applied to; the
+    developer is who a client that found them directly will email. Both find
+    out first often enough that the one who knows should not have to ask
+    somebody else to type it in.
+
+    What stops one reply becoming two rows is not a permission but the clash
+    check below, which is reported on every booking against the same developer
+    whichever identity it was made under.
     """
     profile = linked_profile(body.profile_id, db, user)
-    when = _when(body.scheduled_at)
     if body.mode not in INTERVIEW_MODES:
         raise HTTPException(400, f"Mode must be one of {', '.join(INTERVIEW_MODES)}.")
-    if body.job_id is not None and not db.get(Job, body.job_id):
-        raise HTTPException(400, "No such job to attach it to.")
+    if body.stage not in INTERVIEW_STAGES:
+        raise HTTPException(400, f"Stage must be one of {', '.join(INTERVIEW_STAGES)}.")
+
+    job = None
+    if body.job_id is not None:
+        job = db.get(Job, body.job_id)
+        if job is None:
+            raise HTTPException(400, "No such job to attach it to.")
+
+    # No time yet means a draft, started from the job record while the client's
+    # email is still open. It is parked an hour out so every screen has
+    # something to sort it by, and counted nowhere until a time is agreed.
+    draft = not (body.scheduled_at or "").strip()
+    when = _naive_utc(utcnow() + dt.timedelta(hours=1)) if draft else _when(body.scheduled_at)
 
     minutes = min(600, max(5, body.duration_minutes or 30))
-    clash = _clash(db, profile, when, minutes)
+    # A draft has no agreed time, so there is nothing yet for it to collide
+    # with. Checking anyway would report a clash against a placeholder.
+    clash = None if draft else _clash(db, profile, when, minutes)
+
+    # What the BD copied out of the client's email is usually thinner than what
+    # is already on the job. Fill the gaps from the record rather than making
+    # them retype it, but never overwrite what they did type.
+    client = body.client.strip()[:300] or (job.company or "" if job else "")[:300]
+    role = body.role.strip()[:300] or (job.title or "" if job else "")[:300]
 
     row = Interview(profile_id=profile.id, job_id=body.job_id,
-                    client=body.client.strip()[:300], role=body.role.strip()[:300],
+                    client=client, role=role,
                     scheduled_at=when, duration_minutes=minutes, mode=body.mode,
+                    stage=body.stage,
+                    status="draft" if draft else "scheduled",
                     link=_check_link(body.link, "meeting link"),
                     notes=body.notes.strip(), created_by=user.id)
     db.add(row)
@@ -1550,7 +1773,17 @@ def create_interview(body: InterviewIn, db: Session = Depends(get_db),
 @app.patch("/api/interviews/{interview_id}")
 def update_interview(interview_id: int, body: InterviewPatch,
                      db: Session = Depends(get_db), user: User = Depends(current_user)):
-    """Move it, or say how it went."""
+    """Move it, advance it a stage, or say how it went.
+
+    Either side of the profile may do any of it. The two prose fields are still
+    split by who can answer them — `notes` is the brief the BD wrote from the
+    client's email, `debrief` is what the person in the room said afterwards —
+    but that is a division of labour, not a permission, and a BD who took the
+    debrief over the phone types it in themselves.
+
+    Whichever of them types it, the row is the same row, so the update is on
+    the other one's screen without anybody being told.
+    """
     row = db.get(Interview, interview_id)
     if not row:
         raise HTTPException(404, "No such interview.")
@@ -1559,9 +1792,16 @@ def update_interview(interview_id: int, body: InterviewPatch,
     clash = None
     if body.scheduled_at is not None:
         row.scheduled_at = _when(body.scheduled_at)
+        # Putting a time on a draft is what makes it a real booking. Nothing
+        # else has to be pressed: agreeing the time *is* the confirmation, and
+        # a second step to say so is a step somebody forgets, leaving a real
+        # interview counted nowhere.
+        if row.status == "draft":
+            row.status = "scheduled"
     if body.duration_minutes is not None:
         row.duration_minutes = min(600, max(5, body.duration_minutes))
-    if body.scheduled_at is not None or body.duration_minutes is not None:
+    if (body.scheduled_at is not None or body.duration_minutes is not None) \
+            and row.status != "draft":
         clash = _clash(db, profile, row.scheduled_at, row.duration_minutes,
                        ignore=row.id)
     if body.client is not None:
@@ -1576,13 +1816,27 @@ def update_interview(interview_id: int, body: InterviewPatch,
         row.link = _check_link(body.link, "meeting link")
     if body.notes is not None:
         row.notes = body.notes.strip()
+    if body.debrief is not None:
+        row.debrief = body.debrief.strip()
+    if body.stage is not None:
+        if body.stage not in INTERVIEW_STAGES:
+            raise HTTPException(400, f"Stage must be one of {', '.join(INTERVIEW_STAGES)}.")
+        row.stage = body.stage
     if body.status is not None:
         if body.status not in INTERVIEW_STATUSES:
             raise HTTPException(400, f"Status must be one of {', '.join(INTERVIEW_STATUSES)}.")
+        if body.status != "draft" and row.status == "draft" and body.scheduled_at is None:
+            raise HTTPException(
+                400, "Give it a date and time first — that is what turns a draft into a "
+                     "booking, and there is nothing to put in a diary without one.")
         row.status = body.status
     if body.outcome is not None:
         if body.outcome not in INTERVIEW_OUTCOMES:
             raise HTTPException(400, f"Outcome must be one of {', '.join(INTERVIEW_OUTCOMES)}.")
+        if body.outcome != "pending" and row.status == "draft":
+            raise HTTPException(
+                400, "That one has no time on it yet, so it has not happened. Put it in the "
+                     "diary before saying how it went.")
         row.outcome = body.outcome
         # Nobody records how an interview went before it happens. Saying it was
         # a rejection while the row still reads "scheduled" would leave it on
@@ -1590,6 +1844,16 @@ def update_interview(interview_id: int, body: InterviewPatch,
         # interviews nobody has reported back on.
         if body.outcome != "pending" and row.status == "scheduled":
             row.status = "done"
+
+    # Stamp who reported back, so the other side can see the update is
+    # first-hand and how fresh it is. Only for the fields that say what
+    # happened — moving an interview is not reporting on it.
+    if (body.debrief is not None
+            or (body.outcome is not None and body.outcome != "pending")
+            or (body.status is not None and body.status in ("done", "no_show"))):
+        row.reported_by = user.id
+        row.reported_at = _naive_utc(utcnow())
+
     db.commit()
     return {**_interview_json(db, row), "clash": clash}
 
@@ -1609,6 +1873,159 @@ def delete_interview(interview_id: int, db: Session = Depends(get_db),
     linked_profile(row.profile_id, db, user)
     if user.role != "admin" and row.created_by != user.id:
         raise HTTPException(403, "Cancel it instead, or ask whoever logged it to remove it.")
+    db.delete(row)
+    db.commit()
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Assessments — the take-home a client sends instead of, or after, a call
+# --------------------------------------------------------------------------- #
+
+def _assessment_json(db: Session, row: Assessment) -> dict:
+    return assessments.decorate(db, [row])[0]
+
+
+def _due(text: str) -> Optional[dt.datetime]:
+    """A deadline typed on the team's clock, as UTC to store. Empty is None.
+
+    No deadline is a real answer and the commonest one after "next Friday" —
+    it must not become today, or every screen shows a red flag nobody set.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    try:
+        return from_working(raw)
+    except ValueError:
+        raise HTTPException(400, "That is not a date and time this app can read. "
+                                 "Use the picker, or 2026-08-27T17:00.")
+
+
+@app.get("/api/assessments")
+def list_assessments(profile_id: Optional[int] = None, db: Session = Depends(get_db),
+                     user: User = Depends(current_user)):
+    """What has been set, what is outstanding, what is late.
+
+    Not behind the dashboard switch, for the same reason the diary is not: this
+    is work somebody has been asked to do, and hiding it from them only means
+    it does not get done.
+    """
+    if profile_id is not None:
+        linked_profile(profile_id, db, user)
+        ids: Optional[list[int]] = [profile_id]
+    else:
+        ids = visible_profile_ids(db, user)
+    return {**assessments.summary(db, ids),
+            # What the form starts on: end of the working day, three days out.
+            # Worked out here because the field means Eastern, and a machine in
+            # Karachi prefilling its own clock would suggest the wrong evening.
+            "suggested_due": working_label(
+                utcnow() + dt.timedelta(days=assessments.DUE_SOON_DAYS))["input"]}
+
+
+@app.post("/api/assessments", status_code=201)
+def create_assessment(body: AssessmentIn, db: Session = Depends(get_db),
+                      user: User = Depends(current_user)):
+    """Set one. Usually the BD — the client sent them the brief.
+
+    The developer may too. A client that found them directly sends the test
+    directly, and making them ask somebody else to type it in is how a deadline
+    is lost between two inboxes.
+    """
+    profile = linked_profile(body.profile_id, db, user)
+
+    sitting = None
+    if body.interview_id is not None:
+        sitting = db.get(Interview, body.interview_id)
+        if sitting is None or sitting.profile_id != profile.id:
+            raise HTTPException(400, "That interview is not this profile's.")
+    job = None
+    if body.job_id is not None:
+        job = db.get(Job, body.job_id)
+        if job is None:
+            raise HTTPException(400, "No such job to attach it to.")
+
+    # Fill the gaps from whatever it came out of, and never overwrite what was
+    # typed. A BD forwarding a client's email should not retype the client's
+    # name when the interview or the job already carries it.
+    client = (body.client.strip()
+              or (sitting.client if sitting else "")
+              or (job.company if job else ""))[:300]
+    title = (body.title.strip()
+             or (f"Take-home · {job.title}" if job and job.title else "")
+             or (f"Take-home · {sitting.role}" if sitting and sitting.role else "")
+             or "Take-home")[:300]
+
+    row = Assessment(profile_id=profile.id, interview_id=body.interview_id,
+                     job_id=body.job_id or (sitting.job_id if sitting else None),
+                     title=title, client=client, brief=body.brief.strip(),
+                     link=_check_link(body.link, "assessment link"),
+                     due_at=_due(body.due_at), created_by=user.id, updated_by=user.id)
+    db.add(row)
+    db.commit()
+    return _assessment_json(db, row)
+
+
+@app.patch("/api/assessments/{assessment_id}")
+def update_assessment(assessment_id: int, body: AssessmentPatch,
+                      db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Move the deadline, or say how far along it is.
+
+    Both sides may do either. The halves are a division of labour — the BD has
+    the client's email, the developer has the work — not a permission, and a BD
+    who was told over the phone that it went in should be able to say so.
+    """
+    row = db.get(Assessment, assessment_id)
+    if not row:
+        raise HTTPException(404, "No such assessment.")
+    linked_profile(row.profile_id, db, user)
+
+    if body.title is not None:
+        row.title = body.title.strip()[:300]
+    if body.client is not None:
+        row.client = body.client.strip()[:300]
+    if body.brief is not None:
+        row.brief = body.brief.strip()
+    if body.link is not None:
+        row.link = _check_link(body.link, "assessment link")
+    if body.due_at is not None:
+        row.due_at = _due(body.due_at)
+    if body.submission_url is not None:
+        row.submission_url = _check_link(body.submission_url, "submission link")
+    if body.notes is not None:
+        row.notes = body.notes.strip()
+    if body.status is not None:
+        if body.status not in ASSESSMENT_STATUSES:
+            raise HTTPException(400, f"Status must be one of {', '.join(ASSESSMENT_STATUSES)}.")
+        row.status = body.status
+        # Stamped once, when it first goes back. A later pass or fail is the
+        # client's verdict on the same submission and does not move the date it
+        # was handed in.
+        if body.status in ASSESSMENT_CLOSED and row.submitted_at is None:
+            row.submitted_at = _naive_utc(utcnow())
+        if body.status in assessments.OPEN:
+            row.submitted_at = None
+
+    row.updated_by = user.id
+    db.commit()
+    return _assessment_json(db, row)
+
+
+@app.delete("/api/assessments/{assessment_id}")
+def delete_assessment(assessment_id: int, db: Session = Depends(get_db),
+                      user: User = Depends(current_user)):
+    """Remove one set by mistake. The manager's, or whoever set it.
+
+    A test the client withdrew is worth keeping and marking, the same way a
+    cancelled interview is. This is for the row that was never real.
+    """
+    row = db.get(Assessment, assessment_id)
+    if not row:
+        raise HTTPException(404, "No such assessment.")
+    linked_profile(row.profile_id, db, user)
+    if user.role != "admin" and row.created_by != user.id:
+        raise HTTPException(403, "Ask whoever set it to remove it.")
     db.delete(row)
     db.commit()
     return {"ok": True}

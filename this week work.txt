@@ -1,0 +1,16 @@
+
+Resume this session with:
+claude --resume e2d3602f-9d31-4bf6-bdac-02320347183e
+
+
+> now i want updates show all jobs applied by the bd in his dashboard like all jobs button and when press on it it can open and show all jobs and a bite changes in
+  interview log or schedule like when a bd see or recevied an email for interview it can copy anything like compnay name job title and come it its all jobs applied yet
+  and all data and open it and searh in it for that job and when store any job add a additional button like anything that help interview schudling like after searching bd
+  can marks yes or select the interview stage and then after the selected it that jobs all thing like job title company name url each one is appears in the interview
+  page and show as pending or something untill the bd till the missing thing and then turn  in the interview one more thing when bd apply add a new attribute name job
+  description url and also for new jobs when bd skipped any job it'll neveer show to that bd and when the cycle is open and 2 or more bd turn their in the new job
+  automatically go to that profile too with similar profile if he/she has not submit any records yet but in their new jobs section the jobs land okay and plus mark down
+  every job by the secoure or onwer like find by example jobs from faizan bd's profile go to the khuram bd profile they have like search by or anything like that tag and
+  in the new jobs section the url hover like under the open text make the link visible and clickable and also dev can schudle a meeting too same as bd does and and show
+  dev profile all interview given yet or something and also make interview stages like when 1st one is clear both side bd and dev the info updated and further details
+  added and it also added into the progress and also add a tab of assesments bd add assesment and dev do them and mark them done same as like all and show everything

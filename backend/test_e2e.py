@@ -123,8 +123,27 @@ def hand_in(client, batch_id, headers, profile_id, payload, filename="s.csv"):
 
 
 def listing(client, batch_id, profile_id, headers):
+    """What the profile sees on screen — skipped rows are not on it."""
     return client.get(f"/api/batches/{batch_id}/profiles/{profile_id}/sheet",
                       headers=headers).json()["jobs"]
+
+
+def stored_status(batch_id, profile_id, assignment_id):
+    """One assignment's status straight from the store.
+
+    The screen hides skipped rows, deliberately — there is nothing left to do
+    about one. But "the skip survived the rebuild" is exactly the thing that
+    stops the job coming back, so it still has to be checked somewhere, and
+    the only honest place left is the row itself.
+    """
+    from app.main import SessionLocal
+    from app.models import Assignment
+    db = SessionLocal()
+    try:
+        row = db.get(Assignment, assignment_id)
+        return row.status if row else None
+    finally:
+        db.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -172,7 +191,11 @@ def test_a_messy_sheet_still_maps(client, admin, seeded):
                    (SHEETS / "nadia-applied.csv").read_bytes(), "nadia-applied.csv")
     assert body["mapping"] == {"url": "Post Link", "title": "Position Applied",
                                "company": "Client Name", "platform": "Job Portal",
-                               "date": "Apply Date"}
+                               "date": "Apply Date",
+                               # Nadia's sheet has no description column, and an
+                               # empty string is the mapper saying so rather
+                               # than guessing at one of the other five.
+                               "description_url": ""}
 
 
 def test_two_profiles_may_receive_the_same_job(client, admin, new_profile):
@@ -221,6 +244,11 @@ def test_unworked_jobs_come_back_next_cycle(client, admin, new_profile):
     client.patch(f"/api/assignments/{mine[0]['id']}", json={"status": "applied"}, headers=ali)
     client.patch(f"/api/assignments/{mine[1]['id']}", json={"status": "skipped"}, headers=ali)
 
+    # Skipping it takes it off the screen at once. There is nothing further to
+    # do about a job this profile has turned down, and it never returns.
+    assert len(listing(client, first, khuram, ali)) == 9
+    assert mine[1]["id"] not in {job["id"] for job in listing(client, first, khuram, ali)}
+
     # Nothing new enters the pool second time round, so only carry-forward can
     # fill a list.
     second = open_cycle(client, admin, "Carry 2")
@@ -232,7 +260,10 @@ def test_unworked_jobs_come_back_next_cycle(client, admin, new_profile):
     assert handed[khuram] == 8, "the eight still open return; applied and skipped do not"
 
     stale = listing(client, first, khuram, ali)
-    assert len(stale) == 2, "work that moved forward should not stay open on the old cycle"
+    assert len(stale) == 1, "only the applied one stays visible on the old cycle"
+    assert stale[0]["id"] == mine[0]["id"]
+    assert stored_status(first, khuram, mine[1]["id"]) == "skipped", \
+        "the skip has to survive, or the job comes back next cycle"
 
 
 def test_split_mode_still_gives_each_job_to_one_profile(client, admin, new_profile):
@@ -437,8 +468,13 @@ def test_a_rebuild_keeps_work_people_have_marked(client, admin, new_profile):
     after = listing(client, batch_id, one, ali)
     marks = {job["id"]: job["status"] for job in after}
     assert marks.get(mine[0]["id"]) == "applied", "an applied job disappeared on rebuild"
-    assert marks.get(mine[1]["id"]) == "skipped", "a skipped job disappeared on rebuild"
-    assert len(after) == 10, "the rest of the list is unchanged"
+    # Off the screen, still in the store. Both halves matter: gone from the
+    # list because there is nothing to do, kept underneath because that row
+    # is what stops the job being dispatched again.
+    assert mine[1]["id"] not in marks, "a skipped job should not be back on the list"
+    assert stored_status(batch_id, one, mine[1]["id"]) == "skipped", \
+        "a skipped job disappeared on rebuild"
+    assert len(after) == 9, "the skipped one is gone; the other nine are unchanged"
 
 
 def test_the_timer_builds_an_open_cycle_on_its_own(client, admin, new_profile):

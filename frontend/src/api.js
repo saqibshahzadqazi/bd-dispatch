@@ -142,6 +142,25 @@ export const api = {
     request(`/interviews/${id}`, { method: "PATCH", body: payload }),
   deleteInterview: (id) => request(`/interviews/${id}`, { method: "DELETE" }),
 
+  // Every job applied for, all-time and searchable. Not scoped to a cycle: a
+  // client's reply arrives long after the cycle that earned it closed.
+  jobRecord: ({ q = "", profileId = null, limit = 50, offset = 0 } = {}) => {
+    const params = new URLSearchParams();
+    if (q) params.set("q", q);
+    if (profileId) params.set("profile_id", String(profileId));
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    return request(`/jobs?${params.toString()}`);
+  },
+
+  // Take-homes and tests. Same shape as the diary and scoped the same way.
+  assessments: (profileId) =>
+    request(`/assessments${profileId ? `?profile_id=${profileId}` : ""}`),
+  createAssessment: (payload) => request("/assessments", { method: "POST", body: payload }),
+  updateAssessment: (id, payload) =>
+    request(`/assessments/${id}`, { method: "PATCH", body: payload }),
+  deleteAssessment: (id) => request(`/assessments/${id}`, { method: "DELETE" }),
+
   // A developer's own screen, and a manager looking at one.
   devDashboard: (batchId) => request(`/dashboard/dev${query(batchId)}`),
   developerDashboard: (userId, batchId) =>
