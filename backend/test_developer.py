@@ -101,7 +101,9 @@ def make_profile(client, admin, people):
     """A profile no other test has touched, with a named BD and developer."""
     def make(bd_email="dv-bd@developer.example.com",
              dev_email="dv-one@developer.example.com", **extra):
-        body = {"name": f"Ident{next(_serial)}", "headline": "AI Engineer",
+        # "Behind", because that is what a developer is to a profile — and
+        # because no other module in this suite mints a name starting with it.
+        body = {"name": f"Behind{next(_serial)}", "headline": "AI Engineer",
                 "platform": "Upwork", "user_id": people[bd_email],
                 "dev_user_id": people[dev_email] if dev_email else None}
         body.update(extra)

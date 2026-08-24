@@ -4,6 +4,9 @@ Your team hands in the sheet of jobs each profile applied to. The system works
 out which postings are the same job across every sheet, shows you how much
 effort was spent twice, and gives each profile back the jobs it has never tried.
 
+Then it follows what all that typing turned into: who is interviewing today,
+who is free to take work, and how much of it ended in an offer.
+
 ---
 
 ## The idea in one example
@@ -44,6 +47,82 @@ person. All history — what has been applied to, what has been dispatched —
 belongs to the **profile**, because that is what the client recognises.
 
 Two profiles sharing a headline is not a problem to solve. It is the normal case.
+
+---
+
+## Who is behind the profile
+
+A profile is an identity. Somebody has to actually be it.
+
+- The **BD** runs the account and does the applying. On screen: *run by*.
+- The **developer** is who the profile sells — the person who sits the
+  interview and writes the code. On screen: *developer*.
+
+Two different people, kept apart on purpose. A BD is never handed the
+developer's calendar to manage. A developer can never mark a job applied,
+because that would put work into a BD's record that the BD did not do, and
+retire a posting from the rotation on the strength of somebody who never
+applied for it.
+
+What the developer owns is their own information: the email a client replies
+to, the resume link the BD attaches, their skills, their rate, the hours they
+can actually be reached, and whether they can take work at all.
+
+Those live on the **profile**, not on their account. One developer running two
+identities may well send two different resumes into two different markets, and
+hanging the fields off the person would force those two to be one.
+
+They keep it current themselves. Routing "here is my new CV" through a manager
+is how a stale link ends up on the next fifty applications.
+
+---
+
+## What the applications turned into
+
+Everything above this counts effort — rows typed, duplication avoided, lists
+worked through. A team can improve every one of those figures without winning a
+single piece of work.
+
+An **interview** is the first thing here that records an outcome.
+
+When a client replies, whoever heard first logs it: the BD who runs the
+account, or the developer the client emailed directly. Both may, because both
+find out first about half the time, and the one who knows should not have to
+ask somebody else to type it in.
+
+- **The time is Eastern.** Always, said out loud on the form and again on every
+  row. A BD in Karachi and a developer in Lisbon have to read one appointment
+  as the same moment, so the browser never gets to decide what "half past two"
+  means — the server does it once and hands back a preformatted string.
+- **A double-booking is caught across identities.** Two profiles are two
+  candidates as far as a client is concerned. They are also one person's
+  Tuesday afternoon, and that is exactly where the clash hides. Booking over an
+  existing interview for the same developer is flagged, with what it collides
+  with. It is not refused: a reschedule legitimately overlaps the slot it is
+  leaving, and an app that argues with the person who was on the call gets
+  worked around rather than fixed.
+- **The outcome is what moves the numbers** — *next round*, *offer*, *hired*,
+  *no*. Recording one also records that the interview happened, because nobody
+  says how a call went before it takes place.
+- **A cancellation is never a rejection.** A client who pulled out before the
+  call turned nobody down, and counting it as one makes a quiet week look like
+  a bad one. It stays on the list, greyed, because a slot that vanishes
+  silently reads the same as a slot that was never booked.
+
+What comes out of it is the one figure in this product that cannot be improved
+by typing faster:
+
+```
+applications  ->  interviews  ->  offers  ->  hired
+    1,240             34             6          2
+                 2.7% of         18% of
+                 applications    interviews
+```
+
+And the number to read before any of them: **interviews that have been and gone
+with nobody saying how they went**. Every rate above is understated until
+somebody does, so the app counts them and says so, rather than quietly
+reporting a figure it knows is too low.
 
 ---
 
@@ -123,6 +202,29 @@ read twice. If ten of the thirty jobs you logged were already on somebody
 else's sheet, your search and theirs are covering the same ground, and that is
 fixable at the source in a way no amount of dispatching can match.
 
+### The developer's
+
+Their day, not their score.
+
+It opens on the next interview — the time, the client, the identity they are
+being sold as, and the button that joins the call. Today's list sits under it,
+then what is coming in the fortnight.
+
+Then their own record: how many applications have gone out in their name, how
+many became conversations, what came of them. They are entitled to that. It is
+their name on every one of those applications.
+
+**My details** is the other half of the screen and the part a BD depends on:
+resume link, email, skills, rate, the hours they can be reached — and one
+switch that matters more than the rest. **Can you take work?** Marked *booked
+up*, it appears on the BD's screen before they apply, because winning an
+interview for somebody who cannot start costs the client's goodwill as well as
+an afternoon.
+
+Availability saves the moment it is pressed. Everything else on the card waits
+for **Save** — a colleague acts on availability within the hour, and a draft
+nobody submitted is a developer still quietly showing as free.
+
 ### The manager's
 
 The same picture for the whole workspace, plus the things only a manager can
@@ -141,6 +243,13 @@ act on:
   profiles spent on the same posting, cycle by cycle. It is the number this
   whole tool exists to bring down, and the only place you can see whether it
   is going down.
+- **What it all produced.** The funnel for the whole workspace, today's
+  interviews by name and hour, and the count of interviews nobody has reported
+  back on.
+- **The developers.** Who is behind each profile, whether they could start on
+  Monday, and what is in their diary. **Open** on a row is that developer's own
+  screen, and outcomes can be recorded from it — the person chasing them is
+  usually the one looking.
 
 ### Who may see whose numbers
 
@@ -174,9 +283,20 @@ them; leave it shut when a ranking is not what they need. One profile can be
 taken off it without hiding everyone, from **People and profiles** or the
 switch under the board. It stays on the manager's screen.
 
+**3. And the developers?**
+
+Neither switch touches them, deliberately. Both exist so that nobody is
+*measured* on a screen without somebody deciding to measure them. A developer's
+screen is their own calendar and their own resume — withholding it protects
+nobody and just means they miss the call.
+
+They see the identities they are sold under and nothing else. Another
+developer's diary, another profile's list of jobs, the team board: all refused
+on the server, not merely absent from the tabs.
+
 Nobody ever sees another profile's *jobs*. The board carries totals; the
-drill-down into one profile's record refuses anyone but its owner and the
-manager.
+drill-down into one profile's record refuses anyone but its owner, its
+developer, and the manager.
 
 Both checks are on the server. A closed dashboard is not a hidden tab — it is a
 `403`, and the tab is hidden only so nobody walks into one.
@@ -207,12 +327,20 @@ Leave that running. API docs are at <http://localhost:8000/docs>.
 
 Seeded accounts:
 
-| Email | Password | Role | Runs |
+| Email | Password | Role | Profile |
 |---|---|---|---|
 | `admin@example.com` | `admin12345` | Manager | — |
-| `ali@example.com` | `bdpass12345` | BD | Khuram · AI Engineer |
-| `sara@example.com` | `bdpass12345` | BD | Zahid · AI Engineer |
-| `hina@example.com` | `bdpass12345` | BD | Nadia · Full Stack Engineer |
+| `ali@example.com` | `bdpass12345` | BD | applies as Khuram |
+| `sara@example.com` | `bdpass12345` | BD | applies as Zahid |
+| `hina@example.com` | `bdpass12345` | BD | applies as Nadia |
+| `khuram.dev@example.com` | `devpass12345` | Developer | *is* Khuram |
+| `zahid.dev@example.com` | `devpass12345` | Developer | *is* Zahid |
+| `nadia.dev@example.com` | `devpass12345` | Developer | *is* Nadia |
+
+The seed also writes a diary — two interviews today, some ahead, some behind,
+and one that happened yesterday with no outcome recorded, so the screens have
+something on them. It is skipped entirely once a single interview exists, so
+re-running the seed never doubles anybody up.
 
 **Change these before anyone else can reach the server.**
 
@@ -248,7 +376,12 @@ exercise the auto-mapper and the fuzzy tier.
 3. Sign back in as admin and press **Build the lists**.
 4. Khuram should show 40 and Zahid 20, with ten jobs both had already applied to.
 5. Sign in as Ali — Khuram's list is there, 40 jobs, none of them anything
-   Khuram has touched before.
+   Khuram has touched before. **Who you are applying as** at the top carries
+   Khuram's resume link and email, one click from being pasted into an
+   application.
+6. Still as Ali, open **Interviews** and log one for this afternoon. Sign out,
+   sign in as `khuram.dev@example.com`, and it is at the top of their screen —
+   nothing was emailed and nobody was told.
 
 **Or let the tests do it:**
 
@@ -257,6 +390,7 @@ cd backend
 pytest test_matching.py -v      # 26 rules: fingerprints, fuzzy merge, both modes
 pytest test_e2e.py -v -s        # full round trip, prints the report
 pytest test_dashboard.py -v     # the figures, and who may see whose
+pytest test_developer.py -v     # the developer side: the clock, the clash, the funnel
 pytest                          # all of it
 ```
 
@@ -285,28 +419,44 @@ colleague's machine.
 
 ## Using it for real
 
-1. Sign in as manager → **People and profiles**. Add your team, then add a
-   profile for each identity you apply under and say who runs it. Delete the
-   samples. Decide there, or later from the dashboard, who gets to see their own
-   figures — a new person starts without.
+1. Sign in as manager → **People and profiles**. Add your team — BDs, and a
+   **developer** account for each person your profiles actually sell. Then add
+   a profile per identity and say two things about it: which BD runs it, and
+   which developer it is. Delete the samples. Decide there, or later from the
+   dashboard, who gets to see their own figures — a new BD starts without, and
+   a developer does not need the switch at all.
 2. **Batches** → open a cycle. Pick the mode, the cap, and how often the lists
    should rebuild. Then leave it alone.
-3. Each person signs in and picks the profile they are working as. Two tabs:
+3. Each developer signs in once to fill in their own card under **My
+   details** — resume link, email, skills, rate, hours. Nothing else asks them
+   for it, and a profile with no resume link is a BD applying with nothing to
+   attach.
+4. Each BD signs in and picks the profile they are working as. Three tabs:
    - **Jobs I applied to** — either *Add manually*, which gives a table where
      every **+ New entry** adds a row stamped with the current Eastern time, or
      *Upload a sheet* for anyone who already keeps a spreadsheet. Any column
      layout works; the mapper guesses and they can correct it.
    - **New jobs** — what this profile has never applied to, refreshed as the
      lists rebuild.
-4. Nobody needs to press anything. The lists rebuild on the timer as sheets
+   - **Interviews** — replies that turned into conversations, and the outcomes.
+5. Nobody needs to press anything. The lists rebuild on the timer as sheets
    arrive; **Build now** is there if you want it immediately. **Dashboard**
    shows you who has handed in, who is working their list and who is not,
    without opening anything.
 5. Work the list in the browser or download it as Excel. Marking jobs
    **applied** or **skipped** as you go is what keeps the next cycle accurate,
    and those marks survive every rebuild.
-6. **Close cycle** when the round is done. That stops the rebuilds and stops
-   accepting sheets. Reopen it if you closed too early.
+6. When a client replies, open **Interviews** and log it. Pick the identity,
+   the time in Eastern, who the client is. It lands on the developer's screen
+   without anybody forwarding an email, and you are told there and then if it
+   collides with something they already have.
+7. Afterwards, somebody records how it went — the developer usually, since they
+   were in the room. That single field is what makes every rate in the app
+   mean anything.
+8. **Close cycle** when the round is done. That stops the rebuilds and stops
+   accepting sheets. Reopen it if you closed too early. Interviews are not
+   attached to a cycle and are unaffected: a reply that arrives three weeks
+   late belongs to the work that earned it.
 
 Sheets can be any of `.xlsx`, `.xls`, `.csv`, `.tsv`. Only five columns are
 read; everything else is ignored.
@@ -320,6 +470,10 @@ applications are not. Fixing that at the source (different filters, different
 boards, split by skill) widens the pool before this tool ever runs.
 
 ### What it does not do
+
+It sends no email and no notification. An interview logged here appears on the
+developer's screen the next time it refreshes, which is within the minute, and
+nowhere else. If somebody needs a phone to buzz, that is still a phone.
 
 It has no way to search a job board. The pool is only ever what your team typed
 into their sheets, so a list is "jobs my colleagues found that this profile has
@@ -339,6 +493,12 @@ whose constraints changed. Nothing is lost and the step is idempotent.
 
 Managers get a profile too, since v1 could not rule out that they had uploaded a
 sheet. Retire it from **People and profiles** if it is not wanted.
+
+Version 2.2 added the developer behind a profile, and interviews. That one is
+purely additive — a new table and eight optional columns, all empty — so
+upgrading to it is a restart and nothing else. Every existing profile carries
+on with nobody behind it and no diary, which is exactly how it behaved before
+the columns existed, until a manager attaches somebody.
 
 Back up the file first anyway — it is one `cp`.
 
@@ -400,11 +560,12 @@ backend/
     models.py     Tables, and the constraints that carry the guarantees
     matching.py   Fingerprints, fuzzy merge, cover and split — pure functions
     dashboard.py  Progress figures — read-only queries, no writes anywhere
+    interviews.py The diary and the funnel — read-only too
     ingest.py     Spreadsheet reading and column auto-detection
     exports.py    Excel output
     schema.py     The v1 -> v2 upgrade
-  seed.py         First accounts and profiles, and the sample data generator
-  test_matching.py, test_e2e.py, test_dashboard.py
+  seed.py         First accounts, profiles, developers and the sample data
+  test_matching.py, test_e2e.py, test_dashboard.py, test_developer.py
 
 frontend/
   src/
@@ -416,13 +577,22 @@ frontend/
       Dashboard.jsx        Fetches it for the person whose it is
       ManagerDashboard.jsx The workspace, each person, and the two switches
       BdHome.jsx           Logging jobs and working the list
+      DevHome.jsx          A developer's day — the diary and their record
+      DevProfiles.jsx      What a client is handed, kept by the developer
+      Interviews.jsx       Scheduling and the diary — one component, three screens
       AdminHome.jsx        Running cycles
-      People.jsx           People, profiles, and who is on the board
-      widgets.jsx          Tiles, sparklines, progress bars, the team board
+      People.jsx           People, profiles, developers, and who is on the board
+      widgets.jsx          Tiles, sparklines, progress bars, the board, the funnel
 ```
 
-`dashboard.py` never writes. A dashboard can be opened while the timer is
-halfway through rebuilding a cycle without disturbing it.
+`dashboard.py` and `interviews.py` never write. A dashboard can be opened while
+the timer is halfway through rebuilding a cycle without disturbing it.
+
+Every interview timestamp is stored UTC and converted exactly once, in
+`models.working_label`, which hands the browser the day, the time, a label and
+the value a `datetime-local` input wants back. Nothing in the browser does date
+arithmetic, so there is no second implementation of "what day is that" to drift
+away from the first.
 
 `PersonDashboard.jsx` is rendered by both the person it belongs to and the
 manager looking at them — same component, same payload, one `viewingAs` prop

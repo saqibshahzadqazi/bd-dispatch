@@ -146,8 +146,12 @@ def split(rows: Sequence[dict], upcoming_days: int = UPCOMING_DAYS,
     for row in rows:
         day = dt.date.fromisoformat(row["when"]["day"])
         if row["status"] == "cancelled":
-            if day >= today:
-                soon.append(row)          # so a cancellation is visibly a cancellation
+            # Kept in the upcoming list rather than dropped, because a slot
+            # that vanishes silently reads exactly like a slot that was never
+            # booked. Still bounded by the horizon — a cancellation in
+            # November is not news in August.
+            if today <= day <= horizon:
+                soon.append(row)
             continue
         if day == today:
             now.append(row)

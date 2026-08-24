@@ -3,7 +3,7 @@ import { api } from "../api.js";
 import Interviews from "./Interviews.jsx";
 import {
   Availability, CopyButton, CyclePicker, Funnel, InterviewRows, NextInterview,
-  Skills, Sparkline, Tiles, sinceText,
+  Skills, Sparkline, Tiles,
 } from "./widgets.jsx";
 
 /** A developer's own screen.
@@ -256,7 +256,8 @@ export default function DevHome({ onOpenProfiles }) {
           <div>
             <h2>Your record</h2>
             <p className="muted" style={{ marginTop: 3 }}>
-              Interviews that have been and gone. Last updated {sinceText(data.batch?.last_built_at)}.
+              Interviews that have been and gone. Setting the outcome is what tells your team
+              whether the applications going out in your name are working.
             </p>
           </div>
           <InterviewRows rows={recent} showProfile onChange={(id, patch) =>

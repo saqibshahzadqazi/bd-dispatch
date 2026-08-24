@@ -25,19 +25,11 @@ const BLANK = {
   notes: "",
 };
 
-/** A datetime-local value for an hour from now, rounded to the half hour.
- *
- * Only a starting point for the picker — the browser's clock is not the team's
- * clock, and what the field means is settled on the server. Getting the day
- * roughly right saves the common case of scrolling a month back.
- */
-function soon() {
-  const when = new Date(Date.now() + 60 * 60 * 1000);
-  when.setMinutes(when.getMinutes() < 30 ? 30 : 60, 0, 0);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
-    + `T${pad(when.getHours())}:${pad(when.getMinutes())}`;
-}
+/* The picker starts on `suggested_time` from the server — an hour from now on
+   the team's clock. It is not worked out here on purpose: the field means
+   Eastern, and a machine in Karachi prefilling its own clock would suggest a
+   time nine hours away from the one it appears to say. Nothing in this file
+   does date arithmetic. */
 
 export default function Interviews({
   profiles = [],
@@ -48,14 +40,20 @@ export default function Interviews({
   showFunnel = false,
 }) {
   const [data, setData] = useState(null);
-  const [form, setForm] = useState({ ...BLANK, scheduled_at: soon() });
+  const [form, setForm] = useState(BLANK);
   const [note, setNote] = useState(null);
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      setData(await api.interviews());
+      const next = await api.interviews();
+      setData(next);
+      // Only ever fills an empty field, so a refresh in the background cannot
+      // move a time somebody is halfway through typing.
+      setForm((current) => (current.scheduled_at
+        ? current
+        : { ...current, scheduled_at: next.suggested_time }));
     } catch (err) {
       setNote({ bad: true, text: err.message });
     }
@@ -92,7 +90,8 @@ export default function Interviews({
         profile_id: Number(form.profile_id),
         duration_minutes: Number(form.duration_minutes) || 30,
       });
-      setForm({ ...BLANK, scheduled_at: soon(), profile_id: form.profile_id });
+      setForm({ ...BLANK, scheduled_at: data?.suggested_time || "",
+                profile_id: form.profile_id });
       setAdding(false);
       await load();
       setNote(made.clash

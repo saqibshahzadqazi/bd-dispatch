@@ -1508,7 +1508,13 @@ def list_interviews(profile_id: Optional[int] = None, db: Session = Depends(get_
         ids = visible_profile_ids(db, user)
     rows = interviews.decorate(db, interviews.load(db, ids))
     return {"rows": rows, "counts": interviews.counts(rows),
-            "funnel": interviews.funnel(db, ids), **interviews.split(rows)}
+            "funnel": interviews.funnel(db, ids),
+            # What the scheduling form starts on. Worked out here rather than
+            # in the browser: the field means Eastern, and a machine in Karachi
+            # prefilling its own clock would suggest a time nine hours from the
+            # one it appears to say.
+            "suggested_time": working_label(utcnow() + dt.timedelta(hours=1))["input"],
+            **interviews.split(rows)}
 
 
 @app.post("/api/interviews", status_code=201)
