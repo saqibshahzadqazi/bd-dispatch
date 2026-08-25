@@ -33,8 +33,8 @@ from typing import Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import (ASSESSMENT_CLOSED, Assessment, Interview, Job, Profile,
-                     User, utcnow, working_label)
+from .models import (ASSESSMENT_CLOSED, Application, Assessment, Interview, Job,
+                     Profile, User, utcnow, working_label)
 
 OPEN = ("sent", "in_progress")
 DUE_SOON_DAYS = 3
@@ -98,6 +98,23 @@ def decorate(db: Session, rows: Sequence[Assessment]) -> list[dict]:
     sittings = {i.id: i for i in db.scalars(
         select(Interview).where(Interview.id.in_(interview_ids)))} if interview_ids else {}
 
+    # When this identity applied for the posting, exactly as it was typed on
+    # the sheet — the same field, worked out the same way, as on an interview.
+    # A take-home and the call that produced it describe one conversation, and
+    # two screens disagreeing about when the application went out is worse than
+    # neither of them saying.
+    #
+    # Keyed on job *and* profile: two identities can have applied to the same
+    # posting on different days, and showing one of them under the other is
+    # worse than showing nothing.
+    applied_on: dict[tuple[int, int], str] = {}
+    if job_ids:
+        for job_id, profile_id, stamp in db.execute(
+            select(Application.job_id, Application.profile_id, Application.applied_on)
+            .where(Application.job_id.in_(job_ids))
+        ).all():
+            applied_on[(job_id, profile_id)] = stamp or ""
+
     now = _naive_utc(utcnow())
     soon = now + dt.timedelta(days=DUE_SOON_DAYS)
 
@@ -123,8 +140,14 @@ def decorate(db: Session, rows: Sequence[Assessment]) -> list[dict]:
                            "when": working_label(sitting.scheduled_at)}
                           if sitting else None),
             "job_id": row.job_id,
+            # The whole posting, the same six fields an interview carries.
+            # A developer opening a take-home wants the wording that was
+            # applied to, and the apply link is usually dead by the time a
+            # client gets round to sending a test.
             "job": ({"id": job.id, "title": job.title or "", "company": job.company or "",
-                     "url": job.url or "", "description_url": job.description_url or ""}
+                     "url": job.url or "", "description_url": job.description_url or "",
+                     "platform": job.platform or "",
+                     "applied_on": applied_on.get((job.id, row.profile_id), "")}
                     if job else None),
             "title": row.title,
             "client": row.client,
@@ -175,6 +198,33 @@ def split(rows: Sequence[dict]) -> dict:
 def summary(db: Session, profile_ids: Optional[Sequence[int]] = None) -> dict:
     rows = decorate(db, load(db, profile_ids))
     return {"rows": rows, **split(rows), "counts": counts(rows)}
+
+
+def by_profile(db: Session, profile_ids: Optional[Sequence[int]] = None) -> dict[int, dict]:
+    """Counts per profile, for the boards that show one row per identity.
+
+    One pass over the whole set rather than a query per profile, so a workspace
+    with forty identities costs the same as one with two.
+    """
+    grouped: dict[int, list[dict]] = {}
+    for row in decorate(db, load(db, profile_ids)):
+        grouped.setdefault(row["profile_id"], []).append(row)
+    return {profile_id: counts(rows) for profile_id, rows in grouped.items()}
+
+
+def by_developer(db: Session) -> dict[int, dict]:
+    """Counts per developer, added up across every identity they are sold under.
+
+    The manager's question is "who has a take-home sitting on them", and that
+    is a fact about a person's weekend rather than about an identity — a
+    developer running three profiles with one open test each has three, and
+    seeing them as three separate ones is how they get missed.
+    """
+    grouped: dict[int, list[dict]] = {}
+    for row in decorate(db, load(db, None)):
+        if row["developer_id"]:
+            grouped.setdefault(row["developer_id"], []).append(row)
+    return {dev_id: counts(rows) for dev_id, rows in grouped.items()}
 
 
 def for_interviews(db: Session, interview_ids: Sequence[int]) -> dict[int, list[dict]]:

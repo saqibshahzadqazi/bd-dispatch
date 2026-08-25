@@ -23,6 +23,12 @@ offer. Where a conversation died matters more than that it died — a team losin
 everyone at technical has a different problem from one losing them at final —
 so the stage is carried on every row and counted in `by_stage` below.
 
+Rounds with the same client are chained through `previous_id`, and `chains()`
+below turns that into the thing a screen shows: which round of how many this
+is, and what came before it. A client who ran a screening call, a take-home and
+two technical rounds before saying no is a different fact from four clients who
+each said no after one call, and in a flat list those two are indistinguishable.
+
 `awaiting_outcome` is the number worth putting on a screen: interviews whose
 time has come and gone while the status still says `scheduled`. Nobody has said
 how they went, so every rate below is quietly understated until they do.
@@ -41,6 +47,7 @@ from typing import Optional, Sequence
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from . import assessments
 from .models import (INTERVIEW_STAGES, Application, BatchApplication, Interview,
                      Job, Profile, User, utcnow, working_label, working_today)
 
@@ -87,13 +94,86 @@ def load(db: Session, profile_ids: Optional[Sequence[int]] = None,
     return list(db.scalars(query.order_by(Interview.scheduled_at)))
 
 
+def chains(db: Session, rows: Sequence[Interview]) -> dict[int, dict]:
+    """Which round of how many each of these is, and what it followed on from.
+
+    A conversation is rarely one sitting. The chain is what lets a screen say
+    "round 3 of 3, after the technical" instead of showing three rows that look
+    like three unrelated clients — and it is the only way to tell a client who
+    ran a long process and then said no from one that never got started.
+
+    Predecessors outside the given list are fetched, so a chain reads correctly
+    even on a screen showing only this week. One query for that, whatever the
+    depth, and cycles are guarded against rather than trusted — `previous_id`
+    is a plain column and a restored backup could always hand back a loop.
+    """
+    if not rows:
+        return {}
+    known: dict[int, Interview] = {row.id: row for row in rows}
+
+    # Walk up until nothing new is needed. Chains are two or three long in
+    # practice, so this closes almost always on the first pass.
+    for _ in range(len(INTERVIEW_STAGES) + 1):
+        wanted = {row.previous_id for row in known.values()
+                  if row.previous_id and row.previous_id not in known}
+        if not wanted:
+            break
+        found = list(db.scalars(select(Interview).where(Interview.id.in_(wanted))))
+        if not found:
+            break
+        known.update({row.id: row for row in found})
+
+    def climb(row: Interview) -> list[int]:
+        """This row's ancestry, oldest first, itself last."""
+        seen: list[int] = []
+        current: Optional[Interview] = row
+        while current is not None and current.id not in seen:
+            seen.append(current.id)
+            current = known.get(current.previous_id) if current.previous_id else None
+        return list(reversed(seen))
+
+    # Everything descending from one first conversation counts as one chain, so
+    # "round 2 of 4" is true even when read from the middle of it. `rounds` is
+    # therefore a count of sittings rather than of depth, which is the honest
+    # answer when a chain branches — a client running a panel as two separate
+    # conversations off one screening call has had three sittings, not two.
+    total_for_root: dict[int, int] = defaultdict(int)
+    root_of: dict[int, int] = {}
+    depth_of: dict[int, int] = {}
+    for row in known.values():
+        line = climb(row)
+        root_of[row.id] = line[0]
+        depth_of[row.id] = len(line)
+        total_for_root[line[0]] += 1
+
+    out: dict[int, dict] = {}
+    for row in rows:
+        previous = known.get(row.previous_id) if row.previous_id else None
+        out[row.id] = {
+            "round": depth_of.get(row.id, 1),
+            "rounds": total_for_root.get(root_of.get(row.id, row.id), 1),
+            "follows": ({"id": previous.id,
+                         "stage": previous.stage or "screening",
+                         "outcome": previous.outcome,
+                         "when": working_label(previous.scheduled_at)}
+                        if previous else None),
+        }
+    return out
+
+
 def decorate(db: Session, rows: Sequence[Interview]) -> list[dict]:
     """Interview rows as the browser wants them.
 
-    Two queries whatever the size of the list: the profiles behind the rows,
-    and the people behind the profiles. The names are denormalised in rather
-    than left as ids, because every screen that shows an interview shows who it
-    is for and who is running it.
+    A fixed handful of queries whatever the size of the list: the profiles
+    behind the rows, the people behind the profiles, the postings they came
+    from, the rounds they follow on from, and the take-homes that came out of
+    them. The names are denormalised in rather than left as ids, because every
+    screen that shows an interview shows who it is for and who is running it.
+
+    The assessments ride along on purpose. A take-home set after a technical
+    round is part of that conversation, and a diary that cannot show it sends
+    people to a second tab to find out whether the thing they are waiting on is
+    the client or the developer.
     """
     if not rows:
         return []
@@ -112,6 +192,32 @@ def decorate(db: Session, rows: Sequence[Interview]) -> list[dict]:
     wanted |= {row.reported_by for row in rows}
     wanted.discard(None)
     people = {u.id: u for u in db.scalars(select(User).where(User.id.in_(wanted)))} if wanted else {}
+
+    # When this identity applied for the posting, exactly as it was typed on
+    # the sheet. Kept verbatim rather than derived from a timestamp, because
+    # "applied on" is a thing the BD wrote down and the row's own created_at is
+    # the day the cycle was built — a different day, often by a week.
+    #
+    # Keyed on job *and* profile: two identities can have applied to the same
+    # posting on different days, and showing one of them under the other is
+    # worse than showing nothing.
+    applied_on: dict[tuple[int, int], str] = {}
+    if job_ids:
+        for job_id, profile_id, stamp in db.execute(
+            select(Application.job_id, Application.profile_id, Application.applied_on)
+            .where(Application.job_id.in_(job_ids))
+        ).all():
+            applied_on[(job_id, profile_id)] = stamp or ""
+
+    lineage = chains(db, rows)
+    tests = assessments.for_interviews(db, [row.id for row in rows])
+    # Which of these already have a later round booked out of them. Asked of
+    # the database rather than of the list in hand, because this function is
+    # also called with a single row and "nothing follows it" must not mean
+    # "nothing follows it in the one row I was given".
+    followed = {row_id for (row_id,) in db.execute(
+        select(Interview.previous_id)
+        .where(Interview.previous_id.in_([row.id for row in rows]))).all()}
 
     today = working_today()
     now = _naive_utc(utcnow())
@@ -144,9 +250,15 @@ def decorate(db: Session, rows: Sequence[Interview]) -> list[dict]:
             "stage": row.stage or "screening",
             "is_draft": row.status == "draft",
             # What the job record holds, when the interview came from one.
+            # The whole row, not a subset: this is what a BD reads with the
+            # client's email open three weeks later, and having to go back to
+            # the record for the platform or the date it went out is the
+            # retyping this screen exists to stop.
             "job": ({"id": job.id, "title": job.title or "", "company": job.company or "",
                      "url": job.url or "", "description_url": job.description_url or "",
-                     "platform": job.platform or ""} if job else None),
+                     "platform": job.platform or "",
+                     "applied_on": applied_on.get((job.id, row.profile_id), "")}
+                    if job else None),
             "outcome": row.outcome,
             # The two halves of the row, kept apart. `notes` is the BD's brief,
             # written when it was booked; `debrief` is what the person in the
@@ -163,6 +275,19 @@ def decorate(db: Session, rows: Sequence[Interview]) -> list[dict]:
             "is_past": gone,
             # The nag: it has happened and nobody has said how it went.
             "awaiting_outcome": gone and row.status == "scheduled",
+            # Which round of how many, and the one it followed on from.
+            "previous_id": row.previous_id,
+            **lineage.get(row.id, {"round": 1, "rounds": 1, "follows": None}),
+            # A round that has been cleared and has nothing booked after it is
+            # the commonest place work stalls: everybody assumes somebody else
+            # is arranging the next one. Worked out here so no screen has to.
+            "cleared_nothing_next": bool(
+                row.outcome in CLEARED and row.outcome != "hired"
+                and row.status in ("done", "no_show")
+                and row.id not in followed),
+            # The take-homes that came out of this conversation. Almost always
+            # empty, and when it is not it is the thing everyone is waiting on.
+            "assessments": tests.get(row.id, []),
         })
     return out
 
@@ -208,8 +333,14 @@ def split(rows: Sequence[dict], upcoming_days: int = UPCOMING_DAYS,
     soon.sort(key=lambda r: r["when"]["iso"])
     done.sort(key=lambda r: r["when"]["iso"], reverse=True)
     waiting.sort(key=lambda r: r["id"], reverse=True)
+    # Cleared, and nothing booked after it. Its own list because it is the one
+    # kind of row that looks finished and is not — it sits in `recent` reading
+    # as a success while the client waits for somebody to arrange the next
+    # round. Not bounded like `recent`: a conversation that stalled in June is
+    # still stalled in August, and that is exactly when it needs saying.
+    stalled = [row for row in done if row["cleared_nothing_next"]]
     return {"today": now, "upcoming": soon, "recent": done[:recent],
-            "awaiting_time": waiting}
+            "awaiting_time": waiting, "stalled": stalled}
 
 
 def counts(rows: Sequence[dict]) -> dict:
@@ -226,6 +357,11 @@ def counts(rows: Sequence[dict]) -> dict:
                     if today <= dt.date.fromisoformat(row["when"]["day"]) <= week),
         "scheduled": sum(1 for row in live if not row["is_past"]),
         "awaiting_outcome": sum(1 for row in live if row["awaiting_outcome"]),
+        # Rounds that were cleared and have nothing booked after them. A client
+        # said yes and the conversation stopped anyway, because both sides
+        # assumed the other was arranging it. Nothing else on this screen finds
+        # these — they look identical to a finished, successful interview.
+        "stalled": sum(1 for row in live if row["cleared_nothing_next"]),
         "total": len(live),
     }
 
@@ -347,6 +483,12 @@ def developer_rows(db: Session) -> list[dict]:
     for row in rows:
         per_profile[row["profile_id"]].append(row)
 
+    # A take-home is the other claim on a developer's week, and the one that
+    # does not appear in a calendar. "Free on Thursday" is not free if a test
+    # is due Friday, and a manager reading availability off interviews alone
+    # books over the top of it.
+    tests = assessments.by_developer(db)
+
     out = []
     for dev in devs:
         theirs = by_dev.get(dev.id, [])
@@ -367,9 +509,14 @@ def developer_rows(db: Session) -> list[dict]:
                           "resume_url": p.resume_url or "",
                           "skills": p.skills or ""} for p in theirs],
             "runs": len(theirs),
+            "assessments_open": (tests.get(dev.id) or {}).get("open", 0),
+            "assessments_overdue": (tests.get(dev.id) or {}).get("overdue", 0),
             **tally,
         })
-    out.sort(key=lambda row: (-row["week"], -row["scheduled"], row["name"]))
+    # An overdue take-home outranks a busy diary: the diary is work that will
+    # happen, and an overdue test is work that was supposed to have happened.
+    out.sort(key=lambda row: (-row["assessments_overdue"], -row["week"],
+                              -row["scheduled"], row["name"]))
     return out
 
 

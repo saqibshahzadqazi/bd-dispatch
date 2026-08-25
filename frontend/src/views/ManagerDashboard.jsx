@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, safeUrl } from "../api.js";
 import {
-  Availability, CyclePicker, DeveloperBoard, Funnel, InterviewRows, Progress,
-  Skills, Sparkline, StageLadder, TeamBoard, Tiles, sinceText,
+  AssessmentBoard, Availability, CyclePicker, DeveloperBoard, Funnel,
+  InterviewRows, Loading, Progress, Skills, Sparkline, StageLadder, Stalled,
+  TeamBoard, Tiles, sinceText,
 } from "./widgets.jsx";
 import PersonDashboard from "./PersonDashboard.jsx";
 
@@ -27,8 +28,14 @@ function DeveloperView({ person, batchId, onClose }) {
   const change = (id, patch) =>
     api.updateInterview(id, patch).then(load).catch((err) => setError(err.message));
 
+  // A manager reading a developer's screen is the person most likely to spot a
+  // conversation that stalled, because they are the one looking across all of
+  // them. So it is actionable here rather than a read-only observation.
+  const advance = (row) =>
+    api.nextRound(row.id).then(load).catch((err) => setError(err.message));
+
   if (error) return <div className="notice">{error}</div>;
-  if (!data) return <div className="card pad muted">Loading…</div>;
+  if (!data) return <Loading lines={4} />;
 
   const { counts, funnel } = data;
 
@@ -54,10 +61,25 @@ function DeveloperView({ person, batchId, onClose }) {
         { label: "offers", value: funnel.offers, tone: funnel.offers ? "pine" : undefined },
         { label: "applications in their name", value: funnel.applications, foot: "all time" },
         { label: "reached an interview", value: `${funnel.interview_rate}%` },
+        data.assessments?.counts.total ? {
+          label: "take-homes outstanding", value: data.assessments.counts.open,
+          tone: data.assessments.counts.overdue ? "brick" : undefined,
+          foot: data.assessments.counts.overdue
+            ? `${data.assessments.counts.overdue} past the deadline` : undefined,
+          hint: "Work sitting on this developer's week that no calendar shows.",
+        } : null,
       ]} />
 
       <Funnel data={funnel} awaiting={counts.awaiting_outcome} />
       <StageLadder rows={funnel?.by_stage} />
+
+      <Stalled rows={data.stalled} onNextRound={advance} />
+
+      <AssessmentBoard
+        data={data.assessments}
+        heading={`Take-homes on ${data.developer.name}`}
+        note="A diary says they are free Thursday; a test due Friday says otherwise."
+      />
 
       {data.profiles.length > 0 && (
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
@@ -88,7 +110,8 @@ function DeveloperView({ person, batchId, onClose }) {
         <div>
           <h3>Today</h3>
           <div style={{ marginTop: 8 }}>
-            <InterviewRows rows={data.today} showProfile onChange={change} />
+            <InterviewRows rows={data.today} showProfile onChange={change}
+                           onNextRound={advance} />
           </div>
         </div>
       )}
@@ -97,6 +120,7 @@ function DeveloperView({ person, batchId, onClose }) {
         <h3>Coming up</h3>
         <div style={{ marginTop: 8 }}>
           <InterviewRows rows={data.upcoming} showProfile onChange={change}
+                         onNextRound={advance}
                          empty="Nothing booked in the next fortnight." />
         </div>
       </div>
@@ -105,7 +129,8 @@ function DeveloperView({ person, batchId, onClose }) {
         <div>
           <h3>What happened</h3>
           <div style={{ marginTop: 8 }}>
-            <InterviewRows rows={data.recent} showProfile onChange={change} />
+            <InterviewRows rows={data.recent} showProfile onChange={change}
+                           onNextRound={advance} />
           </div>
         </div>
       )}
@@ -124,7 +149,7 @@ function ProfileDetail({ profileId, batchId, onClose }) {
   }, [profileId, batchId]);
 
   if (error) return <div className="notice">{error}</div>;
-  if (!data) return <div className="card pad muted">Loading…</div>;
+  if (!data) return <Loading lines={4} />;
 
   const { profile, stats } = data;
 
@@ -151,6 +176,12 @@ function ProfileDetail({ profileId, batchId, onClose }) {
         { label: "still to do", value: stats.pending },
         { label: "applications all time", value: stats.all_time },
       ]} />
+
+      <AssessmentBoard
+        data={data.assessments}
+        heading={`Take-homes under ${profile.name}`}
+        note="Tests a client sent to this identity."
+      />
 
       <div>
         <h3>Logged day by day</h3>
@@ -282,11 +313,9 @@ function History({ rows }) {
   return (
     <section>
       <h3>Duplicated effort, cycle by cycle</h3>
-      <p className="muted" style={{ margin: "3px 0 9px" }}>
-        The share of rows handed in that a second profile had already found. This is what
-        falls when people split their searches up — and the only place you can see whether
-        it is falling.
-      </p>
+      <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
+            Rows handed in that a second profile had already found.
+          </p>
       <div className="card pad scroll">
         <div className="history">
           {rows.map((row) => (
@@ -379,7 +408,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
     }
   };
 
-  if (!data) return <p className="muted">Loading the dashboard…</p>;
+  if (!data) return <Loading lines={5} figures />;
 
   const { org, batch, people, profiles, missing, settings } = data;
   const diary = data.interviews;
@@ -435,9 +464,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
       {diary && diary.counts.awaiting_time > 0 && (
         <div className="notice gate">
           <b>{diary.counts.awaiting_time} {diary.counts.awaiting_time === 1
-            ? "reply is" : "replies are"} waiting on a time.</b>{" "}
-          Somebody started them from the job record and has not agreed a time with the client.
-          Until they do, nobody has anything to turn up to and they count towards nothing below.
+            ? "reply" : "replies"} waiting on a time.</b> Nobody has anything to turn up to yet.
         </div>
       )}
 
@@ -452,20 +479,31 @@ export default function ManagerDashboard({ onOpenBatches }) {
       {diary && diary.counts.awaiting_outcome > 0 && (
         <div className="notice">
           <b>{diary.counts.awaiting_outcome} interview
-          {diary.counts.awaiting_outcome === 1 ? " has" : "s have"} happened with nobody saying
-          how it went.</b> Every rate below is understated until they do. The developer who sat
-          in the room can record it from their own screen, and so can you, from their row under
-          <b> The developers</b>.
+          {diary.counts.awaiting_outcome === 1 ? "" : "s"} with no outcome.</b> Every rate below
+          reads low until somebody says.
+        </div>
+      )}
+
+      {data.assessments?.counts.overdue > 0 && (
+        <div className="notice">
+          <b>{data.assessments.counts.overdue} take-home
+          {data.assessments.counts.overdue === 1 ? "" : "s"} past the deadline.</b> Nothing else
+          here shows this.
+        </div>
+      )}
+
+      {diary?.counts.stalled > 0 && (
+        <div className="notice">
+          <b>{diary.counts.stalled} conversation{diary.counts.stalled === 1 ? "" : "s"} cleared
+          a round, then stopped.</b> They read as successes everywhere else.
         </div>
       )}
 
       <section className="stack" style={{ gap: 10 }}>
         <div>
           <h2>What the applications produced</h2>
-          <p className="muted" style={{ marginTop: 3, maxWidth: 780 }}>
-            Everything above this counts effort — rows typed, duplication avoided, lists worked
-            through — and a team can improve every one of those figures without winning a single
-            piece of work. This is the other half, and the only part of it a client decides.
+          <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+            Everything above counts effort. This is the part a client decides.
           </p>
         </div>
         <StageLadder rows={data.funnel?.by_stage} />
@@ -490,15 +528,27 @@ export default function ManagerDashboard({ onOpenBatches }) {
             </div>
           </div>
         )}
+
+        {/* Read-only from the workspace view. Whoever runs that profile books
+            the next round, and their screen is one click away under The
+            developers — a manager quietly booking into somebody else's client
+            relationship is how one reply becomes two conversations. */}
+        <Stalled rows={diary?.stalled} />
+
+        <AssessmentBoard
+          data={data.assessments}
+          heading="Take-homes across the workspace"
+          note="Set by a BD, done by a developer. The only work here with a deadline."
+          limit={12}
+        />
       </section>
 
       <section className="stack" style={{ gap: 10 }}>
         <div>
           <h2>The developers</h2>
-          <p className="muted" style={{ marginTop: 3, maxWidth: 780 }}>
-            The half of the operation that does not type. Who is behind each profile, whether
-            they could start on Monday, and what is in their diary. <b>Open</b> shows you their
-            screen as they see it.
+          <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+            Who is behind each profile, and what is in their diary.
+            {" "}<b>Open</b> shows their screen as they see it.
           </p>
         </div>
         <DeveloperBoard rows={data.developers || []} onOpen={(row) => {
@@ -535,12 +585,10 @@ export default function ManagerDashboard({ onOpenBatches }) {
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <b style={{ fontFamily: "var(--display)" }}>2. Can they see each other?</b>
-            <p className="muted" style={{ marginTop: 3, maxWidth: 620 }}>
-              The team board is every profile side by side, ranked. It reaches only people who
-              already have a dashboard of their own. Useful when the team should see the
-              duplication they are creating between them; a ranking nobody asked for when they
-              should not.
-            </p>
+            <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+            Every profile side by side, ranked. Only reaches people who already
+            have a dashboard.
+          </p>
           </div>
           <label className="row" style={{ gap: 8 }}>
             <input type="checkbox" checked={boardOpen} disabled={saving}
@@ -551,9 +599,8 @@ export default function ManagerDashboard({ onOpenBatches }) {
           </label>
         </div>
         {boardOpen && (
-          <p className="muted">
-            Take one profile off the board with the switch under <b>Every profile</b> below,
-            without hiding everyone. It still appears on your screen.
+          <p className="hint">
+            Take one profile off it under <b>Every profile</b> below.
           </p>
         )}
       </section>
@@ -569,9 +616,8 @@ export default function ManagerDashboard({ onOpenBatches }) {
       <section className="stack" style={{ gap: 10 }}>
         <div>
           <h2>Each person</h2>
-          <p className="muted" style={{ marginTop: 3 }}>
-            One person may run several profiles, so these rows are their profiles added up.
-            Open a row to see them separately.
+          <p className="hint" style={{ marginTop: 3 }}>
+            Profiles added up per person. Open a row to see them separately.
           </p>
         </div>
         <div className="card scroll">

@@ -150,32 +150,28 @@ export default function People() {
     <div className="stack">
       <div>
         <h1>People and profiles</h1>
-        <p className="muted" style={{ marginTop: 3, maxWidth: 780 }}>
-          A <b>person</b> signs in. A <b>profile</b> is the identity a job is applied under —
-          the name and resume the client sees. One person can run several.
+        <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+          A <b>person</b> signs in. A <b>profile</b> is the identity a job is
+          applied under. One person can run several.
         </p>
-        <p className="muted" style={{ marginTop: 6, maxWidth: 780 }}>
-          Two people stand behind every profile and they are not the same person. The
-          <b> BD</b> runs the account and does the applying. The <b>developer</b> is who the
-          profile actually sells — the one who sits the interview and writes the code. Attach
-          them below and interviews reach them without anybody forwarding an email.
-        </p>
+        <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+            The <b>BD</b> runs the account and applies. The <b>developer</b> is who the
+            client meets. Either may be left empty.
+          </p>
       </div>
 
       {note && <div className={note.bad ? "notice" : "notice ok"}>{note.text}</div>}
 
       <section className="card pad">
         <h2>Add a profile</h2>
-        <p className="muted" style={{ marginTop: 6 }}>
-          Two profiles with the same skills are exactly the point: they are two different
-          candidates, so both may go for the same job. The system only ever stops one
-          profile applying to the same job twice.
-        </p>
-        <p className="muted" style={{ marginTop: 6 }}>
-          <b>On the board</b> decides whether a profile appears on the shared team board.
-          It only matters once you open that board from the dashboard — until then nobody
-          but you sees anyone else's numbers.
-        </p>
+        <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+            Two profiles with the same skills are two candidates — both may go for
+            one job. Only the same profile twice is blocked.
+          </p>
+        <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+            <b>On the board</b> decides whether a profile appears on the shared
+            team board.
+          </p>
         <div className="row" style={{ marginTop: 12 }}>
           <input placeholder="Profile name, e.g. Khuram" value={profile.name}
                  onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
@@ -271,18 +267,14 @@ export default function People() {
 
       <section className="card pad">
         <h2>Add a person</h2>
-        <p className="muted" style={{ marginTop: 6, maxWidth: 680 }}>
-          A new BD starts with <b>no dashboard</b>. They can log jobs and work their list
-          straight away; the screen of figures — what they logged, how much a colleague also
-          found, how much of their list they have worked through — appears only once you open
-          it for them in the table below.
-        </p>
-        <p className="muted" style={{ marginTop: 6, maxWidth: 680 }}>
-          A <b>developer</b> is different, and the switch does not apply to them. Their screen
-          is their own diary and their own resume, not a set of figures somebody has to decide
-          to show them — so it works from the moment the account exists. Attach them to a
-          profile above or they sign in to an empty desk.
-        </p>
+        <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+            A new BD starts with <b>no dashboard</b> — they can still log jobs and work
+            their list. Turn it on when you want them measured.
+          </p>
+        <p className="hint" style={{ marginTop: 3, maxWidth: 660 }}>
+            The switch does not apply to a <b>developer</b>: their diary and resume are
+            always theirs to see.
+          </p>
         <div className="row" style={{ marginTop: 12 }}>
           <input placeholder="Full name" value={person.name}
                  onChange={(e) => setPerson({ ...person, name: e.target.value })} />

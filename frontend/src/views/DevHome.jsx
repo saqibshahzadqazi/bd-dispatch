@@ -3,8 +3,9 @@ import { api } from "../api.js";
 import Assessments from "./Assessments.jsx";
 import Interviews from "./Interviews.jsx";
 import {
-  Availability, CopyButton, CyclePicker, Funnel, InterviewRows, NextInterview,
-  Skills, Sparkline, Tiles,
+  AssessmentBoard, Availability, CopyButton, CyclePicker, Empty, Funnel,
+  InterviewRows, Loading, NextInterview, Segment, Skills, Sparkline, Stalled,
+  Tiles,
 } from "./widgets.jsx";
 
 /** A developer's own screen.
@@ -33,7 +34,7 @@ import {
  * exists so nobody is measured without somebody deciding to measure them; this
  * is a calendar and a resume, and withholding it only means nobody turns up.
  */
-export default function DevHome({ onOpenProfiles }) {
+export default function DevHome({ onOpenProfiles, pane: jumpTo = null, onPaneSeen }) {
   const [data, setData] = useState(null);
   const [batchId, setBatchId] = useState(null);
   const [profiles, setProfiles] = useState([]);
@@ -48,6 +49,13 @@ export default function DevHome({ onOpenProfiles }) {
   // desk | diary | assessments — the diary and the assessments are full
   // screens rather than a strip on the desk once there is anything in them.
   const [pane, setPane] = useState("desk");
+
+  // The command palette can land straight on a sub-tab.
+  useEffect(() => {
+    if (!jumpTo) return;
+    setPane(jumpTo);
+    onPaneSeen?.();
+  }, [jumpTo, onPaneSeen]);
 
   const load = useCallback(async (id) => {
     try {
@@ -88,8 +96,11 @@ export default function DevHome({ onOpenProfiles }) {
   // A BD can set a take-home at any moment, and the deadline on it is usually
   // days rather than weeks.
   useEffect(() => {
+    // The whole payload rather than only the counts: the desk shows the open
+    // ones as a list now, and fetching them twice to render one screen would
+    // be two requests saying the same thing.
     const pull = () => api.assessments(only)
-      .then((next) => setTests(next.counts))
+      .then(setTests)
       .catch(() => {});
     pull();
     const tick = setInterval(pull, 60000);
@@ -97,7 +108,7 @@ export default function DevHome({ onOpenProfiles }) {
   }, [only]);
 
   if (error && !data) return <div className="notice">{error}</div>;
-  if (!data) return <p className="muted">Loading your day…</p>;
+  if (!data) return <Loading lines={4} figures />;
 
   // Until the narrowed diary lands, the whole one stands in. It is a fraction
   // of a second, and a blank calendar is a worse thing to show somebody than a
@@ -119,16 +130,26 @@ export default function DevHome({ onOpenProfiles }) {
     })
     .catch((e) => { setError(e.message); return null; });
 
+  /* A developer books the next round too. They are usually the first to know
+     it is wanted — the client said so in the room — and making them ask
+     somebody else to type it in is how a week goes by. Same refresh path as
+     every other write here, so the narrowed and whole figures cannot drift. */
+  const advance = (row) => api.nextRound(row.id)
+    .then(async (made) => {
+      await load(batchId);
+      if (only) setScoped(await api.interviews(only));
+      return made;
+    })
+    .catch((e) => { setError(e.message); return null; });
+
   if (!data.profiles.length) {
     return (
       <div className="stack">
         <h1>Your desk</h1>
-        <div className="notice">
-          No profile is attached to you yet, so there is nothing here. A profile is the
-          identity your team applies under — your name and resume as the client sees them.
-          Ask your manager to put you behind one under <b>People and profiles</b>, and this
+        <Empty title="Nothing here yet">
+          No profile is attached to you. Ask your manager to put you behind one and this
           screen fills in on its own.
-        </div>
+        </Empty>
       </div>
     );
   }
@@ -170,54 +191,47 @@ export default function DevHome({ onOpenProfiles }) {
               </button>
             ))}
           </div>
-          <p className="muted" style={{ marginTop: 9 }}>
-            Each of these is a different candidate as far as a client is concerned, with its own
-            BD, its own resume and its own diary. Everything below — today, what is coming, and
-            what it all turned into — narrows to whichever you pick.
+          <p className="hint" style={{ marginTop: 9 }}>
+            Each is a different candidate to a client, with its own BD, resume and
+            diary. Everything below narrows to whichever you pick.
           </p>
         </section>
       )}
 
-      {tests?.overdue > 0 && (
+      {tests?.counts.overdue > 0 && (
         <div className="notice">
-          <b>{tests.overdue} assessment{tests.overdue === 1 ? " is" : "s are"} past the
+          <b>{tests.counts.overdue} take-home{tests.counts.overdue === 1 ? "" : "s"} past the
           deadline.</b>{" "}
-          A missed take-home costs the interview that earned it.{" "}
           <button className="link" onClick={() => setPane("assessments")}>Open them</button>
         </div>
       )}
 
-      <div className="row" style={{ gap: 8 }}>
-        <button className={pane === "desk" ? "" : "ghost"} onClick={() => setPane("desk")}>
-          Today
-        </button>
-        <button className={pane === "diary" ? "" : "ghost"} onClick={() => setPane("diary")}>
-          Every interview{counts.total ? ` (${counts.total})` : ""}
-        </button>
-        <button className={pane === "assessments" ? "" : "ghost"}
-                onClick={() => setPane("assessments")}>
-          Assessments{tests?.open ? ` (${tests.open})` : ""}
-        </button>
-      </div>
+      <Segment
+        label="Your desk"
+        value={pane}
+        onChange={setPane}
+        items={[
+          { key: "desk", label: "Today", count: counts.today, tone: "a" },
+          { key: "diary", label: "Every interview", count: counts.total },
+          { key: "assessments", label: "Assessments",
+            count: tests?.counts.open,
+            tone: tests?.counts.overdue ? "bad" : undefined },
+        ]}
+      />
 
       {pane === "assessments" ? (
         <Assessments
           profiles={only ? profiles.filter((p) => p.id === only) : profiles}
           profileId={only}
           heading={chosen ? `${chosen.name}'s assessments` : "Your assessments"}
-          intro="Take-homes and tests set against the identities you are sold under. Your BD
-                 usually sets them, because the client sends them the brief — doing them, and
-                 saying how far along you are, is yours. Set one yourself if a client sent it
-                 straight to you."
+          intro="Tests set against the identities you are sold under. Doing them is yours."
         />
       ) : pane === "diary" ? (
         <Interviews
           profiles={only ? profiles.filter((p) => p.id === only) : profiles}
           profileId={only}
           heading={chosen ? `${chosen.name}'s interviews` : "Every interview"}
-          intro="Everything against the identities you are applied under — what is coming, what
-                 has been, and how each of them went. Book one yourself if a client emailed you
-                 directly."
+          intro="What is coming, what has been, and how each went. Book one if a client emailed you."
           showProfile
           showFunnel
         />
@@ -266,6 +280,19 @@ export default function DevHome({ onOpenProfiles }) {
         </div>
       )}
 
+      {/* On the desk rather than only in the diary tab. A client who said "we
+          would like you to meet the team" and then heard nothing is the one
+          thing on this screen the developer can fix in a single press, and it
+          is the developer who usually heard them say it. */}
+      <Stalled rows={diary.stalled} onNextRound={advance} />
+
+      <AssessmentBoard
+        data={tests || data.assessments}
+        onOpen={() => setPane("assessments")}
+        heading={chosen ? `Take-homes under ${chosen.name}` : "Take-homes on you"}
+        note="Your BD usually sets these; doing them is yours."
+      />
+
       {today.length > 0 && (
         <section className="stack" style={{ gap: 8 }}>
           <div>
@@ -274,7 +301,7 @@ export default function DevHome({ onOpenProfiles }) {
               Everything today, including what has already been — Eastern time.
             </p>
           </div>
-          <InterviewRows rows={today} showProfile onChange={report} />
+          <InterviewRows rows={today} showProfile onChange={report} onNextRound={advance} />
         </section>
       )}
 
@@ -287,17 +314,15 @@ export default function DevHome({ onOpenProfiles }) {
             </div>
             <button className="ghost" onClick={() => setPane("diary")}>Open the diary</button>
           </div>
-          <InterviewRows rows={upcoming} showProfile onChange={report} />
+          <InterviewRows rows={upcoming} showProfile onChange={report} onNextRound={advance} />
         </section>
       )}
 
       <section className="stack" style={{ gap: 8 }}>
         <div>
           <h2>What your applications turned into</h2>
-          <p className="muted" style={{ marginTop: 3, maxWidth: 720 }}>
-            Every other figure your team looks at counts effort — rows typed, jobs dispatched.
-            This one counts what came of it, and it is the only one that cannot be improved by
-            typing faster.
+          <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
+            The only figure here that cannot be improved by typing faster.
           </p>
         </div>
         <Funnel data={funnel} awaiting={counts.awaiting_outcome} />
@@ -307,9 +332,8 @@ export default function DevHome({ onOpenProfiles }) {
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div>
             <h2>The identities you are applied under</h2>
-            <p className="muted" style={{ marginTop: 3 }}>
-              What a client sees when your team applies for you. Keep the resume and the address
-              right — these are what goes out.
+            <p className="hint" style={{ marginTop: 3 }}>
+              What a client sees when your team applies for you.
             </p>
           </div>
           {onOpenProfiles && <button className="ghost" onClick={onOpenProfiles}>Edit your details</button>}
@@ -367,9 +391,8 @@ export default function DevHome({ onOpenProfiles }) {
 
       <section>
         <h3>Applications logged under your name</h3>
-        <p className="muted" style={{ margin: "3px 0 9px" }}>
-          The last thirty days, in Eastern time. This is your team working; you are seeing it,
-          not being measured on it.
+        <p className="hint" style={{ margin: "3px 0 9px" }}>
+          The last thirty days, Eastern time. Your team working — not your score.
         </p>
         <div className="card pad"><Sparkline series={data.activity} /></div>
       </section>
@@ -378,14 +401,12 @@ export default function DevHome({ onOpenProfiles }) {
         <section className="stack" style={{ gap: 8 }}>
           <div>
             <h2>Your record</h2>
-            <p className="muted" style={{ marginTop: 3 }}>
-              Interviews that have been and gone. Setting the outcome, and writing the note
-              under <b>notes</b>, is what tells your team whether the applications going out in
-              your name are working — and it is the only part of this row they cannot fill in
-              themselves.
+            <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
+              Been and gone. The outcome and the note are the parts only you can
+              fill in.
             </p>
           </div>
-          <InterviewRows rows={recent} showProfile onChange={report} />
+          <InterviewRows rows={recent} showProfile onChange={report} onNextRound={advance} />
         </section>
       )}
         </>

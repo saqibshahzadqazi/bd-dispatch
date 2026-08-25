@@ -132,18 +132,77 @@ an availability problem, and those call for opposite fixes.
 take-home is a place a candidate is *at* — the client is not talking to anyone
 else while it is out.
 
+### Climbing it
+
+A round that goes well used to leave the next one to be typed from scratch —
+same client, same role, same posting, retyped out of memory by whoever got to
+it. So it often was not typed for a week, and the client was left waiting on a
+team that thought it was winning.
+
+Press **next round** on any sitting that has happened. The new one inherits the
+profile, the posting, the client and the role, comes in one rung up the ladder,
+and is linked back to the round that earned it. No time is set unless you give
+one, so it lands under **Waiting on a time** like any other reply nobody has
+agreed an hour for.
+
+Pressing it also settles the round before, if nobody has said how that one went
+— you do not book a second round with a client who said no. Same rule as
+putting a time on a draft: the act *is* the statement. An outcome somebody
+already recorded is never overwritten, and a round still in the future is not
+marked done, because a client saying up front that there will be two rounds is
+not a report on the first one.
+
+Linked rounds read as one conversation: *round 2 of 3 · after the screening
+call*. That matters because a client who ran four rounds and then said no is a
+different fact from four clients who each said no after one call, and in a flat
+list of interviews those two are indistinguishable.
+
+Removing a round never takes what followed it. The link is a convenience;
+losing it costs a breadcrumb, while deleting a real second round along with a
+mistyped first one would cost the work.
+
+### Cleared, and nothing booked after
+
+The quietest way this product loses work. The client said yes, no next round
+was ever put in, and on every other screen that row reads as a success — it has
+a good outcome and nothing about it looks unfinished.
+
+So it is counted and listed on its own: **cleared, and nothing booked after
+it**, on the BD's screen, the developer's desk and the manager's overview.
+Booking the next round is what clears it. A hire never appears there — nothing
+follows a hire; it is the end of the ladder, not a gap in it.
+
 ### A reply, before there is a time
 
 A client answers on Tuesday and the call is not agreed until Thursday. In
 between, the conversation exists and nothing in a diary can hold it.
 
 So it can be started with no time at all. Open **All jobs**, find the posting
-they replied about, and press *they replied* — the title, the client and both
-links come across from the record, and the row waits under **Waiting on a
-time**. It is in no rate, no funnel and no count of what is coming, because
+they replied about, and press *they replied* — the row waits under **Waiting on
+a time**. It is in no rate, no funnel and no count of what is coming, because
 none of that is true of it yet. Putting a time in is what books it; there is
 deliberately no second confirm button, since agreeing the time *is* the
 confirmation and an extra step is one somebody forgets.
+
+The whole posting travels with it, not a useful-looking subset:
+
+| Job title | Client | Job link | Description link | Platform | Applied on |
+|---|---|---|---|---|---|
+
+Those six are what a BD has in front of them when they answer the email, and
+they stay on the row through booking, through every round after it, and into
+the export. **Applied on** is the date that profile wrote on its own sheet —
+kept per identity, because two profiles can have applied to one posting on
+different days and showing one of them under the other is worse than showing
+nothing.
+
+The booking form does the same thing from the other direction. **Which job did
+they reply about?** searches the record for the profile you are booking under,
+and picking a row attaches the posting and fills the client and the role if you
+have not typed them. Both ways in produce the same row, rather than one that
+carries the posting and one typed out of memory a fortnight later. Changing the
+profile on the form drops anything already attached — a job the *other*
+identity applied to is not this conversation.
 
 ---
 
@@ -189,11 +248,35 @@ test before anybody speaks, and an assessment that could only hang off a call
 would force somebody to invent a call that never happened. When it *did* come
 out of a round, it links back to it and reads as "after the technical round".
 
+It carries the same posting an interview does — the six fields above, worked
+out the same way, including that profile's own **applied on** date. Name a call
+on the form and the posting comes across with it, because the call already
+knows which one; leave the call blank and the same job search offers it
+directly. A take-home and the conversation that produced it are one thing, and
+two screens describing it differently is worse than neither of them saying.
+
 **No deadline is a real answer**, and the commonest one after "next Friday". It
 stays empty rather than becoming today, because an invented deadline is a red
 flag on somebody's screen that nobody set. One that *is* set and passes turns
 the row over — but only while it is still open. A take-home submitted late is a
 thing that happened, not a thing to chase.
+
+A deadline is the one thing here that goes wrong **silently**. Every other
+figure in this app understates itself when nobody touches it — an unreported
+interview makes a good week look quiet. A missed assessment does the opposite:
+nothing changes on any screen, the row sits there looking exactly as it did
+yesterday, and the first anybody hears of it is the client's next email. So it
+is carried everywhere rather than kept in its own tab:
+
+- on **every dashboard** — the BD's, the developer's, the manager's, and a
+  single profile's page;
+- on the **interview row it came out of**, because when a client has sent a
+  test the test *is* the state of that conversation, and having to open a
+  second tab to find out whether you are waiting on the client or on your own
+  developer is how a week goes past;
+- on the **developer board**, as a column. "Free on Thursday" is not free when
+  a test is due Friday, and a manager reading availability off the diary alone
+  books straight over it. An overdue one sorts that developer to the top.
 
 - **The time is Eastern.** Always, said out loud on the form and again on every
   row. A BD in Karachi and a developer in Lisbon have to read one appointment
@@ -228,6 +311,14 @@ And the number to read before any of them: **interviews that have been and gone
 with nobody saying how they went**. Every rate above is understated until
 somebody does, so the app counts them and says so, rather than quietly
 reporting a figure it knows is too low.
+
+All of it downloads. **Download as Excel** on the interviews screen gives two
+sheets — every conversation, with its round and what it followed, and every
+take-home with its deadline and what went back. It is scoped exactly like the
+screen it comes from: a BD gets the profiles they run, a developer the ones
+they are sold under, a manager the workspace. Everything else this app exports
+counts what went *out*; this is the half that says what came back, and it is
+the half somebody is asked about at the end of a quarter.
 
 ---
 
@@ -296,7 +387,13 @@ download is the record of what the cycle dispatched, not a list of things to do.
 
 Every job on a list also says **who found it**. A run of jobs from one
 colleague's profile that are all wrong for yours is a fixable thing — but only
-if you can see whose search they came from.
+if you can see whose search they came from. Press one of those names and the
+list narrows to everything that profile found, because reading "found by
+Faizan" on a single row is a curiosity while seeing the whole run of them
+together is what tells you whether to trust the next twenty. The same box
+filters by client, title, platform or link, and the download carries the tag
+too — a file somebody works through on a train should not be a worse document
+than the screen it came from.
 
 ### Profiles that have not handed anything in
 
@@ -336,8 +433,12 @@ button that takes you to them.
 
 Under it: what you logged this cycle, how much of it a colleague had already
 found, how much of your list you have worked through, a fortnight of daily
-activity, and a card per profile you run. The duplicate count is the one to
-read twice. If ten of the thirty jobs you logged were already on somebody
+activity, and a card per profile you run — each saying whether that identity
+owes a client a take-home, because a card about how much went out is half the
+story if it is silent about the test that could lose it. Below that, what the
+applications turned into, any conversation that cleared a round and then
+stopped, and the take-homes outstanding against your profiles. The duplicate
+count is the one to read twice. If ten of the thirty jobs you logged were already on somebody
 else's sheet, your search and theirs are covering the same ground, and that is
 fixable at the source in a way no amount of dispatching can match.
 
@@ -359,9 +460,18 @@ The booking is read-only to them. What they write is the half a BD cannot
 answer: whether the call happened, what came of it, and — under **notes** on
 the row — how it actually went. It reaches their BD the moment they save it.
 
+They book too, and they advance a round themselves. A client that found them
+directly emails them directly, and the developer is usually the first to know a
+second round is wanted — the client said so in the room. Making them ask
+somebody else to type it in is how a week goes by. What stops one reply
+becoming two rows is not a permission but the clash check, which fires on any
+booking against the same developer whichever identity it was made under.
+
 Then their own record: how many applications have gone out in their name, how
 many became conversations, what came of them. They are entitled to that. It is
-their name on every one of those applications.
+their name on every one of those applications. Alongside it, the take-homes
+sitting on their week and any conversation that cleared a round and then
+stopped — the one thing on that screen they can fix in a single press.
 
 **My details** is the other half of the screen and the part a BD depends on:
 resume link, email, skills, rate, the hours they can be reached — and one
@@ -395,10 +505,18 @@ act on:
 - **What it all produced.** The funnel for the whole workspace, today's
   interviews by name and hour, and the count of interviews nobody has reported
   back on.
+- **Conversations that stalled.** Cleared a round, nothing booked after it.
+  Read-only from here on purpose: whoever runs that profile books the next
+  round, and their screen is one click away under *The developers* — a manager
+  quietly booking into somebody else's client relationship is how one reply
+  becomes two conversations.
+- **Take-homes across the workspace**, late first. The only work in this
+  product with a deadline on it, and until now the only kind a manager had no
+  screen for at all.
 - **The developers.** Who is behind each profile, whether they could start on
-  Monday, and what is in their diary. **Open** on a row is that developer's own
-  screen, and outcomes can be recorded from it — the person chasing them is
-  usually the one looking.
+  Monday, what is in their diary, and how many take-homes are sitting on them.
+  **Open** on a row is that developer's own screen, and outcomes can be
+  recorded from it — the person chasing them is usually the one looking.
 
 ### Who may see whose numbers
 
@@ -670,9 +788,12 @@ assessments. `assessments` is a new table `create_all` makes on its own; the
 rest is two more optional columns. Every interview already recorded lands on
 `screening`, which is what most first conversations were, and can be moved.
 
-Both are restart-only. Back up the file first anyway — it is one `cp`.
+Version 2.5 linked a round to the one it followed on from, so a client who ran
+four rounds reads as one story rather than four unrelated rows. One nullable
+column on `interviews`. Every interview already recorded has no predecessor,
+which is exactly what an empty column says.
 
-Back up the file first anyway — it is one `cp`.
+All of these are restart-only. Back up the file first anyway — it is one `cp`.
 
 ---
 
@@ -735,10 +856,11 @@ backend/
     interviews.py The diary, the ladder and the funnel — read-only too
     assessments.py Take-homes and their deadlines — read-only too
     ingest.py     Spreadsheet reading and column auto-detection
-    exports.py    Excel output
-    schema.py     The v1 -> v2 upgrade
+    exports.py    Excel output — dispatched lists, the cycle report, the pipeline
+    schema.py     The v1 -> v2 upgrade, and the columns added since
   seed.py         First accounts, profiles, developers and the sample data
-  test_matching.py, test_e2e.py, test_dashboard.py, test_developer.py
+  test_matching.py, test_e2e.py, test_dashboard.py, test_developer.py,
+  test_pipeline.py
 
 frontend/
   src/
@@ -758,7 +880,9 @@ frontend/
       Assessments.jsx      Take-homes: set on one side, done on the other
       AdminHome.jsx        Running cycles
       People.jsx           People, profiles, developers, and who is on the board
-      widgets.jsx          Tiles, sparklines, progress bars, the board, the funnel
+      widgets.jsx          Tiles, sparklines, progress bars, the board, the
+                           funnel, the stage ladder, the stalled list and the
+                           take-home board
 ```
 
 `dashboard.py` and `interviews.py` never write. A dashboard can be opened while

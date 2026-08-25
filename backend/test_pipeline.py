@@ -494,3 +494,432 @@ def test_a_late_joiner_is_given_jobs_not_given_away(client, admin, bd, make_prof
     given = {p["id"]: p["assigned"] for p in data["participants"]}
     # 950-952 are its own history and never come back; 953-959 are new to it.
     assert given[idle["id"]] == 7
+
+
+# --------------------------------------------------------------------------- #
+# Rounds — one conversation, several sittings
+# --------------------------------------------------------------------------- #
+
+def sat(client, headers, profile_id, days=-3, clock="10:00", **extra):
+    """An interview that has already been and gone, unless days says otherwise."""
+    body = {"profile_id": profile_id, "scheduled_at": when(days, clock),
+            "client": "Larkspur Data", "role": "RAG Developer"}
+    body.update(extra)
+    response = client.post("/api/interviews", json=body, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_booking_the_next_round_carries_the_conversation_across(client, bd, applied):
+    """The gap this closes loses work.
+
+    A screening call goes well and the second round then has to be retyped from
+    memory — same client, same role, same posting — so it usually is not typed
+    for a week, and the client is left waiting on a team that thinks it is
+    winning. One press instead, and nothing is retyped.
+    """
+    profile = applied["profile"]["id"]
+    record = client.get(f"/api/jobs?profile_id={profile}", headers=bd).json()["rows"][0]
+    first = sat(client, bd, profile, stage="screening", job_id=record["job_id"])
+
+    made = client.post(f"/api/interviews/{first['id']}/next-round", json={}, headers=bd)
+    assert made.status_code == 201, made.text
+    second = made.json()
+
+    assert second["client"] == "Larkspur Data"
+    assert second["role"] == "RAG Developer"
+    assert second["job_id"] == record["job_id"]
+    assert second["stage"] == "technical"          # one rung up, guessed for them
+    assert second["previous_id"] == first["id"]
+    # No time was agreed, so it waits rather than inventing an appointment.
+    assert second["status"] == "draft"
+    assert second["round"] == 2 and second["rounds"] == 2
+
+    # And booking it is what says the round before was cleared.
+    assert second["previous"]["outcome"] == "passed"
+    assert second["previous"]["status"] == "done"
+
+
+def test_booking_the_next_round_does_not_overwrite_a_recorded_outcome(client, bd, dev,
+                                                                      applied):
+    """An offer somebody recorded is theirs. A scheduling action must not
+    quietly demote it to `passed`."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile, stage="final")
+    client.patch(f"/api/interviews/{first['id']}", json={"outcome": "offer"}, headers=dev)
+
+    made = client.post(f"/api/interviews/{first['id']}/next-round", json={}, headers=bd)
+    assert made.status_code == 201, made.text
+    assert made.json()["previous"]["outcome"] == "offer"
+
+
+def test_a_round_that_has_not_happened_yet_is_not_marked_done(client, bd, applied):
+    """A client saying up front that there will be two rounds is not a report
+    on the first one, and a call next Tuesday must not read as finished."""
+    profile = applied["profile"]["id"]
+    ahead = sat(client, bd, profile, days=4, clock="15:00", stage="screening")
+
+    made = client.post(f"/api/interviews/{ahead['id']}/next-round", json={}, headers=bd)
+    assert made.status_code == 201, made.text
+    assert made.json()["previous"]["status"] == "scheduled"
+    assert made.json()["previous"]["outcome"] == "pending"
+
+
+def test_nothing_follows_a_round_that_was_a_no(client, bd, dev, applied):
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile)
+    client.patch(f"/api/interviews/{first['id']}", json={"outcome": "rejected"}, headers=dev)
+
+    refused = client.post(f"/api/interviews/{first['id']}/next-round", json={}, headers=bd)
+    assert refused.status_code == 400
+    assert "no" in refused.json()["detail"].lower()
+
+
+def test_a_reply_with_no_time_on_it_cannot_have_a_second_round(client, bd, applied):
+    """A draft has not happened. There is nothing for a next round to follow."""
+    profile = applied["profile"]["id"]
+    draft = client.post("/api/interviews",
+                        json={"profile_id": profile, "scheduled_at": "",
+                              "client": "Larkspur Data"}, headers=bd).json()
+    assert draft["status"] == "draft"
+
+    refused = client.post(f"/api/interviews/{draft['id']}/next-round", json={}, headers=bd)
+    assert refused.status_code == 400
+
+
+def test_a_chain_of_rounds_reads_as_one_conversation(client, bd, applied):
+    """Four rounds with one client is a different fact from four clients who
+    each said no after one call, and in a flat list they look identical."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile, stage="screening")
+    second = client.post(f"/api/interviews/{first['id']}/next-round",
+                         json={"scheduled_at": when(-2, "11:00")}, headers=bd).json()
+    third = client.post(f"/api/interviews/{second['id']}/next-round",
+                        json={"scheduled_at": when(-1, "11:00")}, headers=bd).json()
+
+    rows = {row["id"]: row for row in
+            client.get(f"/api/interviews?profile_id={profile}", headers=bd).json()["rows"]}
+    assert [rows[first["id"]]["round"], rows[second["id"]]["round"],
+            rows[third["id"]]["round"]] == [1, 2, 3]
+    assert rows[third["id"]]["rounds"] == 3
+    # Read from the middle, it still knows what came before it.
+    assert rows[second["id"]]["follows"]["stage"] == "screening"
+    assert rows[first["id"]]["follows"] is None
+
+
+def test_a_chain_cannot_cross_two_profiles(client, bd, applied):
+    """A chain of rounds is one client talking to one identity. Linking across
+    two would make a stranger's conversation part of this profile's story."""
+    first = sat(client, bd, applied["profile"]["id"])
+    refused = client.post("/api/interviews",
+                          json={"profile_id": applied["other"]["id"],
+                                "scheduled_at": when(1, "09:00"),
+                                "previous_id": first["id"]}, headers=bd)
+    assert refused.status_code == 400
+
+
+def test_a_cleared_round_with_nothing_after_it_is_called_out(client, bd, dev, applied):
+    """The quietest way this product loses work: the client said yes, nobody
+    booked the next round, and on every other screen it reads as a success."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile, stage="screening")
+    client.patch(f"/api/interviews/{first['id']}", json={"outcome": "passed"}, headers=dev)
+
+    diary = client.get(f"/api/interviews?profile_id={profile}", headers=bd).json()
+    assert diary["counts"]["stalled"] == 1
+    assert [row["id"] for row in diary["stalled"]] == [first["id"]]
+
+    # Booking what follows is what clears it.
+    client.post(f"/api/interviews/{first['id']}/next-round", json={}, headers=bd)
+    after = client.get(f"/api/interviews?profile_id={profile}", headers=bd).json()
+    assert after["counts"]["stalled"] == 0
+
+
+def test_a_hire_is_not_a_stalled_conversation(client, bd, dev, applied):
+    """Nothing follows a hire. It is the end of the ladder, not a gap in it."""
+    profile = applied["profile"]["id"]
+    row = sat(client, bd, profile, stage="offer")
+    client.patch(f"/api/interviews/{row['id']}", json={"outcome": "hired"}, headers=dev)
+    diary = client.get(f"/api/interviews?profile_id={profile}", headers=bd).json()
+    assert diary["counts"]["stalled"] == 0
+
+
+def test_removing_a_round_leaves_what_followed_it_standing(client, bd, applied):
+    """The link is a convenience. Losing it costs a breadcrumb; taking a real
+    second round away with a mistyped first one would cost the work."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile)
+    second = client.post(f"/api/interviews/{first['id']}/next-round",
+                         json={"scheduled_at": when(-1, "12:00")}, headers=bd).json()
+
+    assert client.delete(f"/api/interviews/{first['id']}", headers=bd).status_code == 200
+
+    rows = {row["id"]: row for row in
+            client.get(f"/api/interviews?profile_id={profile}", headers=bd).json()["rows"]}
+    assert second["id"] in rows
+    assert rows[second["id"]]["previous_id"] is None
+    assert rows[second["id"]]["round"] == 1
+
+
+def test_the_developer_can_book_the_next_round_too(client, bd, dev, applied):
+    """They are usually the first to know it is wanted — the client said so in
+    the room — and making them ask somebody else to type it in loses a week."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile)
+    made = client.post(f"/api/interviews/{first['id']}/next-round", json={}, headers=dev)
+    assert made.status_code == 201, made.text
+    assert made.json()["previous_id"] == first["id"]
+
+
+def test_a_stranger_cannot_book_a_round_onto_someone_elses_conversation(
+        client, bd, other_bd, applied):
+    first = sat(client, bd, applied["profile"]["id"])
+    refused = client.post(f"/api/interviews/{first['id']}/next-round", json={},
+                          headers=other_bd)
+    assert refused.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# Take-homes, everywhere they have to be seen
+# --------------------------------------------------------------------------- #
+
+def test_a_take_home_shows_on_the_interview_it_came_out_of(client, bd, applied):
+    """When a client has sent a test, the test *is* the state of that
+    conversation. A diary that cannot say so sends people to a second screen to
+    find out whether they are waiting on the client or on their own developer.
+    """
+    profile = applied["profile"]["id"]
+    sitting = sat(client, bd, profile, stage="technical")
+    client.post("/api/assessments",
+                json={"profile_id": profile, "interview_id": sitting["id"],
+                      "title": "Small RAG pipeline", "due_at": when(2, "17:00")},
+                headers=bd)
+
+    rows = {row["id"]: row for row in
+            client.get(f"/api/interviews?profile_id={profile}", headers=bd).json()["rows"]}
+    attached = rows[sitting["id"]]["assessments"]
+    assert [a["title"] for a in attached] == ["Small RAG pipeline"]
+
+
+def test_an_overdue_take_home_reaches_every_dashboard(client, admin, bd, dev, applied):
+    """A missed deadline is the one thing here that goes wrong silently. Every
+    other figure understates itself when nobody touches it; this one changes
+    nothing on any screen until the client's next email — so it has to be on
+    all of them.
+    """
+    profile = applied["profile"]["id"]
+    client.post("/api/assessments",
+                json={"profile_id": profile, "title": "Late take-home",
+                      "due_at": when(-2, "17:00")},
+                headers=bd)
+
+    mine = client.get("/api/dashboard/me", headers=bd).json()
+    assert mine["assessments"]["counts"]["overdue"] >= 1
+
+    org = client.get("/api/dashboard/overview", headers=admin).json()
+    assert org["assessments"]["counts"]["overdue"] >= 1
+
+    desk = client.get("/api/dashboard/dev", headers=dev).json()
+    assert desk["assessments"]["counts"]["overdue"] >= 1
+
+    detail = client.get(f"/api/dashboard/profiles/{profile}", headers=bd).json()
+    assert detail["assessments"]["counts"]["overdue"] == 1
+
+    # And on the profile's own row, so a board about how much went out cannot
+    # stay silent about the test that could lose it.
+    row = next(p for p in mine["profiles"] if p["profile_id"] == profile)
+    assert row["assessments_open"] == 1
+    assert row["assessments_overdue"] == 1
+
+
+def test_the_developer_board_says_who_owes_a_take_home(client, admin, bd, applied):
+    """Free on Thursday is not free when a test is due Friday, and a manager
+    reading availability off the diary alone books straight over it."""
+    profile = applied["profile"]["id"]
+    client.post("/api/assessments",
+                json={"profile_id": profile, "title": "Weekend eater",
+                      "due_at": when(1, "17:00")},
+                headers=bd)
+
+    board = client.get("/api/dashboard/overview", headers=admin).json()["developers"]
+    mine = next(row for row in board if row["name"] == "Dev Pipe")
+    assert mine["assessments_open"] >= 1
+
+
+def test_the_pipeline_downloads_as_a_spreadsheet(client, bd, dev, applied):
+    """Everything downloadable until now counted what went out, and a team can
+    improve all of that without winning a single piece of work. This is the
+    other half — the part somebody is asked about at the end of a quarter."""
+    from openpyxl import load_workbook
+
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile, stage="screening")
+    client.post(f"/api/interviews/{first['id']}/next-round",
+                json={"scheduled_at": when(-1, "10:00")}, headers=bd)
+    client.post("/api/assessments",
+                json={"profile_id": profile, "title": "Small RAG pipeline",
+                      "due_at": when(-1, "17:00")},
+                headers=bd)
+
+    got = client.get(f"/api/pipeline.xlsx?profile_id={profile}", headers=bd)
+    assert got.status_code == 200, got.text
+    book = load_workbook(io.BytesIO(got.content))
+    assert book.sheetnames == ["Conversations", "Take-homes"]
+
+    talks = [[c.value for c in row] for row in book["Conversations"].iter_rows(min_row=2)]
+    assert any("2 of 2" in (row[5] or "") for row in talks)     # the chain is legible
+
+    tests = [[c.value for c in row] for row in book["Take-homes"].iter_rows(min_row=2)]
+    # Said in words: a file outlives the screen that would explain a status.
+    assert any("overdue" in (row[5] or "") for row in tests)
+
+
+def test_a_stranger_cannot_download_someone_elses_pipeline(client, bd, other_bd, applied):
+    sat(client, bd, applied["profile"]["id"])
+    refused = client.get(f"/api/pipeline.xlsx?profile_id={applied['profile']['id']}",
+                         headers=other_bd)
+    assert refused.status_code == 403
+
+
+def test_the_dispatched_sheet_keeps_who_found_each_job(client, admin, bd, applied):
+    """The download is what somebody works through on a train, and it should
+    not be a worse document than the screen it came from."""
+    from openpyxl import load_workbook
+
+    got = client.get(f"/api/batches/{applied['batch']}/profiles/"
+                     f"{applied['profile']['id']}/sheet.xlsx", headers=bd)
+    assert got.status_code == 200, got.text
+    sheet = load_workbook(io.BytesIO(got.content)).worksheets[0]
+    headers = [cell.value for cell in sheet[1]]
+    assert "Found by" in headers and "Description link" in headers
+
+    column = headers.index("Found by")
+    rows = [[c.value for c in row] for row in sheet.iter_rows(min_row=2)]
+    assert any(row[column] for row in rows), "nothing said who found these"
+
+
+def test_nothing_follows_a_round_that_was_called_off(client, bd, applied):
+    """A cancelled call never happened, so it cleared nothing. Marking it
+    passed on the way to booking a second round would invent a conversation."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile)
+    client.patch(f"/api/interviews/{first['id']}", json={"status": "cancelled"}, headers=bd)
+
+    refused = client.post(f"/api/interviews/{first['id']}/next-round", json={}, headers=bd)
+    assert refused.status_code == 400
+    assert "called off" in refused.json()["detail"]
+
+    # And it is still a cancellation afterwards, not a pass.
+    rows = {row["id"]: row for row in
+            client.get(f"/api/interviews?profile_id={profile}", headers=bd).json()["rows"]}
+    assert rows[first["id"]]["status"] == "cancelled"
+    assert rows[first["id"]]["outcome"] == "pending"
+
+
+def test_the_whole_posting_travels_onto_the_interview(client, bd, applied):
+    """Six things, and a BD reading a client's reply three weeks later wants
+    all of them. Going back to the record for the platform or the day it went
+    out is exactly the retyping the record exists to stop."""
+    profile = applied["profile"]["id"]
+    record = next(r for r in
+                  client.get(f"/api/jobs?profile_id={profile}", headers=bd).json()["rows"]
+                  if r["url"] and r["description_url"])
+
+    made = client.post("/api/interviews",
+                       json={"profile_id": profile, "scheduled_at": "",
+                             "job_id": record["job_id"]}, headers=bd)
+    assert made.status_code == 201, made.text
+    job = made.json()["job"]
+
+    assert job["title"] == record["title"]
+    assert job["company"] == record["company"]
+    assert job["url"] == record["url"]
+    assert job["description_url"] == record["description_url"]
+    assert job["platform"] == record["platform"]
+    # The date the BD wrote on their sheet, not the day the cycle was built.
+    assert job["applied_on"] == record["applied_on"]
+
+    # And it is still all there on the list the waiting-on-a-time table reads.
+    waiting = client.get(f"/api/interviews?profile_id={profile}",
+                         headers=bd).json()["awaiting_time"]
+    row = next(r for r in waiting if r["id"] == made.json()["id"])
+    assert row["job"]["applied_on"] == record["applied_on"]
+    assert row["job"]["platform"] == record["platform"]
+
+
+def test_the_applied_date_shown_is_this_profiles_own(client, bd, applied):
+    """Two identities can have applied to one posting on different days, and
+    showing one of them under the other is worse than showing nothing."""
+    mine, theirs = applied["profile"]["id"], applied["other"]["id"]
+    shared = [r for r in
+              client.get(f"/api/jobs?profile_id={mine}", headers=bd).json()["rows"]]
+    others = {r["job_id"]: r for r in
+              client.get(f"/api/jobs?profile_id={theirs}", headers=bd).json()["rows"]}
+    overlap = next((r for r in shared if r["job_id"] in others), None)
+    assert overlap, "the fixture is meant to share postings between the two profiles"
+
+    for profile_id, expected in ((mine, overlap), (theirs, others[overlap["job_id"]])):
+        row = client.post("/api/interviews",
+                          json={"profile_id": profile_id, "scheduled_at": "",
+                                "job_id": overlap["job_id"]}, headers=bd).json()
+        assert row["job"]["applied_on"] == expected["applied_on"]
+
+
+def test_a_take_home_carries_the_whole_posting_too(client, bd, applied):
+    """A take-home and the call that produced it describe one conversation.
+    Two screens disagreeing about which board it came off, or when the
+    application went out, is worse than neither of them saying."""
+    profile = applied["profile"]["id"]
+    record = next(r for r in
+                  client.get(f"/api/jobs?profile_id={profile}", headers=bd).json()["rows"]
+                  if r["url"] and r["description_url"])
+
+    made = client.post("/api/assessments",
+                       json={"profile_id": profile, "job_id": record["job_id"],
+                             "title": "Small RAG pipeline"}, headers=bd)
+    assert made.status_code == 201, made.text
+    job = made.json()["job"]
+
+    for field in ("title", "company", "url", "description_url", "platform", "applied_on"):
+        assert job[field] == record[field], field
+
+    # And still whole on the list every screen reads.
+    rows = client.get(f"/api/assessments?profile_id={profile}", headers=bd).json()["rows"]
+    row = next(r for r in rows if r["id"] == made.json()["id"])
+    assert row["job"]["platform"] == record["platform"]
+    assert row["job"]["applied_on"] == record["applied_on"]
+
+
+def test_a_take_home_set_from_a_call_inherits_that_calls_posting(client, bd, applied):
+    """Naming the interview is enough. The call already knows which posting it
+    came out of, and asking for it twice is the retyping this all exists to
+    stop."""
+    profile = applied["profile"]["id"]
+    record = next(r for r in
+                  client.get(f"/api/jobs?profile_id={profile}", headers=bd).json()["rows"]
+                  if r["url"])
+    sitting = sat(client, bd, profile, stage="technical", job_id=record["job_id"])
+
+    made = client.post("/api/assessments",
+                       json={"profile_id": profile, "interview_id": sitting["id"],
+                             "title": "Take-home"}, headers=bd)
+    assert made.status_code == 201, made.text
+    assert made.json()["job"]["url"] == record["url"]
+    assert made.json()["job"]["applied_on"] == record["applied_on"]
+
+
+def test_the_take_home_applied_date_is_this_profiles_own(client, bd, applied):
+    """Same rule as the diary: two identities can have applied on different
+    days, and showing one under the other invents a fact."""
+    mine, theirs = applied["profile"]["id"], applied["other"]["id"]
+    ours = client.get(f"/api/jobs?profile_id={mine}", headers=bd).json()["rows"]
+    others = {r["job_id"]: r for r in
+              client.get(f"/api/jobs?profile_id={theirs}", headers=bd).json()["rows"]}
+    overlap = next((r for r in ours if r["job_id"] in others), None)
+    assert overlap, "the fixture is meant to share postings between the two profiles"
+
+    for profile_id, expected in ((mine, overlap), (theirs, others[overlap["job_id"]])):
+        row = client.post("/api/assessments",
+                          json={"profile_id": profile_id, "job_id": overlap["job_id"],
+                                "title": "Shared posting"}, headers=bd).json()
+        assert row["job"]["applied_on"] == expected["applied_on"]

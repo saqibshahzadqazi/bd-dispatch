@@ -1,5 +1,36 @@
 import React from "react";
 
+/** The shape of what is coming, while it is still coming.
+ *
+ * A spinner says "wait"; this says "a headline, some figures and a table are
+ * about to be here", which is the same wait spent usefully. It also holds the
+ * height, so nothing under the pointer jumps when the data lands.
+ */
+export function Loading({ lines = 3, figures = false }) {
+  return (
+    <div className="stack enter-fade" style={{ gap: 12 }} aria-busy="true" aria-live="polite">
+      <span className="sr-only">Loading</span>
+      <div className="skeleton" style={{ height: 22, width: 200 }} />
+      {figures && (
+        <div className="stats">
+          {Array.from({ length: 4 }, (_, i) => (
+            <div className="stat" key={i}>
+              <div className="skeleton" style={{ height: 22, width: 54, marginBottom: 6 }} />
+              <div className="skeleton" style={{ height: 10, width: 88 }} />
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="card pad stack" style={{ gap: 9 }}>
+        {Array.from({ length: lines }, (_, i) => (
+          <div className="skeleton" key={i}
+               style={{ height: 12, width: `${94 - i * 13}%` }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** "just now", "4 minutes ago", "2 hours ago" — enough to trust the numbers.
  *
  * Stored timestamps are UTC. SQLite hands them back with no marker at all, so
@@ -18,6 +49,51 @@ export function sinceText(iso) {
   const days = Math.round(hours / 24);
   if (days < 30) return `${days} day${days === 1 ? "" : "s"} ago`;
   return then.toLocaleDateString();
+}
+
+/** The sub-tabs inside a screen, as one control rather than a row of buttons.
+ *
+ * Five loose buttons read as five unrelated actions; a segmented control reads
+ * as one question with five answers, which is what it is. The count rides on
+ * the tab it belongs to, so "Interviews (3 waiting)" needs no second line.
+ *
+ * `items` are `{ key, label, count, tone }`. A falsy entry is dropped, so a tab
+ * that only exists in some states can be written inline.
+ */
+export function Segment({ items, value, onChange, label = "View" }) {
+  const shown = items.filter(Boolean);
+  if (shown.length < 2) return null;
+  return (
+    <div className="segment" role="tablist" aria-label={label}>
+      {shown.map((item) => (
+        <button key={item.key} role="tab" aria-pressed={value === item.key}
+                aria-selected={value === item.key}
+                onClick={() => onChange(item.key)}>
+          {item.label}
+          {item.count ? (
+            <span className="count" style={item.tone ? { color: `var(--${item.tone})` } : undefined}>
+              {item.count}
+            </span>
+          ) : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Nothing here — said in a way that reads as finished rather than broken.
+ *
+ * A blank panel is indistinguishable from a failed request. A sentence and,
+ * where there is one, a way out, is the difference.
+ */
+export function Empty({ title, children, action }) {
+  return (
+    <div className="empty">
+      {title && <b>{title}</b>}
+      {children}
+      {action && <div style={{ marginTop: 12 }}>{action}</div>}
+    </div>
+  );
 }
 
 /** A row of headline numbers. `tone` tints the figure, not the label. */
@@ -192,6 +268,18 @@ export function ProfileCard({ row, children, onOpen }) {
         <span>{row.done_pct}% worked through</span>
         <span>{row.all_time} applications all time</span>
       </div>
+      {/* A card about how much this identity applied for is half the story if
+          it says nothing about the test it owes a client. Only drawn when
+          there is one — a permanent "0 take-homes" is noise. */}
+      {row.assessments_open > 0 && (
+        <div style={{ fontSize: 12,
+                      color: row.assessments_overdue ? "var(--brick)" : undefined }}>
+          {row.assessments_open} take-home{row.assessments_open === 1 ? "" : "s"} outstanding
+          {row.assessments_overdue
+            ? ` · ${row.assessments_overdue} past the deadline`
+            : ""}
+        </div>
+      )}
       {children}
     </div>
   );
@@ -365,6 +453,197 @@ export const STAGE_LABELS = {
   offer: "offer talks",
 };
 
+export const ASSESSMENT_LABELS = {
+  sent: "sent",
+  in_progress: "in progress",
+  submitted: "submitted",
+  passed: "passed",
+  failed: "failed",
+};
+
+/** Which round of how many, and what it followed on from.
+ *
+ * A conversation is rarely one sitting, and a flat list of interviews makes a
+ * client who ran four rounds before saying no look exactly like four clients
+ * who each said no after one call. Those are opposite problems.
+ */
+export function Round({ row }) {
+  if (!row || (row.rounds || 1) < 2) return null;
+  return (
+    <span className="muted" style={{ fontSize: 11 }} title={
+      row.follows
+        ? `Booked out of the ${STAGE_LABELS[row.follows.stage] || row.follows.stage}`
+          + ` on ${row.follows.when.label}.`
+        : undefined}>
+      round {row.round} of {row.rounds}
+      {row.follows ? ` · after the ${STAGE_LABELS[row.follows.stage] || row.follows.stage}` : ""}
+    </span>
+  );
+}
+
+/** The posting a conversation came out of.
+ *
+ * Six things, and a BD reading a client's reply three weeks later wants all of
+ * them: the title, the client, where it was applied, where the posting is
+ * written out, which board it came off, and the day it went. Going back to the
+ * job record for the last two is exactly the retyping the record exists to
+ * stop, so the whole row travels onto the interview rather than a useful-looking
+ * subset of it.
+ *
+ * Both links, never one. They are usually the same on the day and rarely the
+ * same three weeks later — an expired posting redirects to a board's home page
+ * and takes the wording with it, and the wording is what the reply is about.
+ */
+export function JobDetail({ job, showTitle = false }) {
+  if (!job) return null;
+  const apply = safeLink(job.url);
+  const spec = safeLink(job.description_url);
+  const foot = [job.platform, job.applied_on ? `applied ${job.applied_on}` : ""]
+    .filter(Boolean).join(" · ");
+
+  return (
+    <div style={{ fontSize: 11, lineHeight: 1.5 }}>
+      {showTitle && job.title && (
+        <div className="truncate" style={{ fontSize: 12 }}>{job.title}</div>
+      )}
+      {(apply || spec) && (
+        <div>
+          {spec && (
+            <a href={spec} target="_blank" rel="noreferrer noopener"
+               title={job.description_url}>the posting</a>
+          )}
+          {spec && apply && " · "}
+          {apply && (
+            <a href={apply} target="_blank" rel="noreferrer noopener" title={job.url}>
+              where it was applied
+            </a>
+          )}
+        </div>
+      )}
+      {foot && <div className="muted">{foot}</div>}
+    </div>
+  );
+}
+
+/** Attach the posting a client is replying about, without retyping it.
+ *
+ * The mirror of pressing *they replied* on the job record: same result, from
+ * the other direction, for somebody who is already in the diary. Picking a row
+ * carries the title, the client and both links onto the interview, so the two
+ * ways into a conversation produce the same row rather than one good one and
+ * one typed out of memory.
+ *
+ * `onSearch` is a prop rather than a call into the api module, because nothing
+ * in this file talks to the server — the same reason safeLink is duplicated
+ * here instead of imported.
+ */
+export function JobPicker({ value, onPick, onClear, onSearch, disabled = false }) {
+  const [q, setQ] = React.useState("");
+  const [rows, setRows] = React.useState([]);
+  const [busy, setBusy] = React.useState(false);
+  const typing = React.useRef(null);
+
+  React.useEffect(() => {
+    clearTimeout(typing.current);
+    if (!q.trim() || disabled) {
+      setRows([]);
+      return undefined;
+    }
+    // A short pause is the signal somebody has finished pasting. One request
+    // per keystroke would be slower and no more useful.
+    typing.current = setTimeout(() => {
+      setBusy(true);
+      Promise.resolve(onSearch(q.trim()))
+        .then((found) => setRows(found || []))
+        .catch(() => setRows([]))
+        .finally(() => setBusy(false));
+    }, 250);
+    return () => clearTimeout(typing.current);
+  }, [q, disabled, onSearch]);
+
+  if (value) {
+    return (
+      <div className="card pad stack" style={{ gap: 6 }}>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+          <div>
+            <b style={{ fontSize: 13 }}>{value.title || "Untitled posting"}</b>
+            <div className="muted" style={{ fontSize: 12 }}>
+              {value.company || "no client recorded"}
+            </div>
+          </div>
+          <button className="link" onClick={() => { setQ(""); onClear(); }}>
+            not this one
+          </button>
+        </div>
+        <JobDetail job={value} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <input style={{ width: "100%" }} value={q} disabled={disabled}
+             placeholder={disabled
+               ? "Pick which profile first"
+               : "Paste the client, the job title, or the link"}
+             onChange={(e) => setQ(e.target.value)} />
+      <span className="muted" style={{ fontSize: 12 }}>
+        {busy ? "Searching the record…"
+          : q.trim() && !rows.length ? "Nothing in the record matches that."
+            : "Optional. Attaching it carries the title, the client and both links across, "
+              + "and keeps the posting readable once the apply link expires."}
+      </span>
+      {rows.length > 0 && (
+        <div className="card scroll" style={{ maxHeight: 210 }}>
+          <table className="board">
+            <tbody>
+              {rows.map((row) => (
+                <tr key={`${row.job_id}-${row.profile_id}`}>
+                  <td className="truncate" style={{ maxWidth: 260 }}>
+                    {row.title || <span className="muted">no title recorded</span>}
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      {[row.company, row.platform,
+                        row.applied_on ? `applied ${row.applied_on}` : ""]
+                        .filter(Boolean).join(" · ") || "—"}
+                    </div>
+                  </td>
+                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    <button className="link" onClick={() => { setQ(""); onPick(row); }}>
+                      this one
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The take-homes that came out of one conversation, as chips on its row.
+ *
+ * On the interview rather than only in its own tab, because when a client has
+ * sent a test the test *is* the state of that conversation, and a diary that
+ * cannot say so sends people to a second screen to find out whether they are
+ * waiting on the client or on their own developer.
+ */
+export function AssessmentChips({ rows }) {
+  if (!rows?.length) return null;
+  return (
+    <span className="row" style={{ gap: 5 }}>
+      {rows.map((row) => (
+        <span key={row.id}
+              className={row.overdue ? "pill off" : row.status === "passed" ? "pill on" : "pill"}
+              title={`${row.title || "take-home"}${row.due ? ` · due ${row.due.label}` : ""}`}>
+          {row.overdue ? "take-home overdue" : `take-home ${ASSESSMENT_LABELS[row.status] || row.status}`}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 
 /** Interviews as a table.
  *
@@ -377,7 +656,8 @@ export const STAGE_LABELS = {
  * Leave `onChange` off entirely for a screen that only reads.
  */
 export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
-                               canBook = true, empty = "Nothing scheduled." }) {
+                               onNextRound, canBook = true,
+                               empty = "Nothing scheduled." }) {
   const [open, setOpen] = React.useState(null);
   if (!rows?.length) return <div className="card pad muted">{empty}</div>;
   const columns = showProfile ? 8 : 7;
@@ -415,7 +695,17 @@ export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
                   </td>
                 )}
                 <td>{row.client || <span className="muted">—</span>}</td>
-                <td className="truncate">{row.role || <span className="muted">—</span>}</td>
+                <td style={{ maxWidth: 280 }}>
+                  <div className="truncate">
+                    {row.role || <span className="muted">—</span>}
+                  </div>
+                  {/* The posting itself. A developer opening this an hour
+                      before the call wants the wording that was applied to,
+                      and the apply link is usually dead by then — which is
+                      exactly why both are here rather than one. */}
+                  <JobDetail job={row.job} />
+                  <AssessmentChips rows={row.assessments} />
+                </td>
                 <td className="muted">
                   {MODE_LABELS[row.mode] || row.mode}
                   <div style={{ fontSize: 11 }}>{row.duration_minutes} min</div>
@@ -433,6 +723,7 @@ export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
                       {STAGE_LABELS[row.stage] || row.stage || "—"}
                     </span>
                   )}
+                  <div><Round row={row} /></div>
                 </td>
                 <td>
                   {onChange ? (
@@ -466,6 +757,15 @@ export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
                       it happened — nobody has said how it went
                     </div>
                   )}
+                  {/* Cleared, and nothing booked after it. The quietest way
+                      this product loses work: it reads as a success on every
+                      screen while the client waits for somebody to arrange the
+                      next round. */}
+                  {row.cleared_nothing_next && onNextRound && (
+                    <div style={{ fontSize: 11, color: "var(--brick)" }}>
+                      cleared — nothing booked after it
+                    </div>
+                  )}
                   {row.reported_by && (
                     <div className="muted" style={{ fontSize: 11 }}>
                       {row.reported_by} reported it{row.reported_at ? ` · ${row.reported_at}` : ""}
@@ -475,6 +775,17 @@ export function InterviewRows({ rows, showProfile = true, onChange, onRemove,
                 <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                   {safeLink(row.link) && (
                     <a href={safeLink(row.link)} target="_blank" rel="noreferrer noopener">open</a>
+                  )}
+                  {/* Offered on anything that has happened and was not a no,
+                      not only on the stalled ones — the moment a developer
+                      says "they want me to meet the team" is the moment this
+                      should cost one press. */}
+                  {onNextRound && row.status !== "draft" && row.status !== "cancelled"
+                    && row.outcome !== "rejected" && row.outcome !== "hired"
+                    && (row.is_past || row.status === "done") && (
+                    <button className="link" onClick={() => onNextRound(row)}>
+                      next round
+                    </button>
                   )}
                   <button className="link"
                           onClick={() => setOpen(open === row.id ? null : row.id)}>
@@ -536,10 +847,10 @@ function InterviewNotes({ row, canBook, onChange, onClose }) {
 
       <div>
         <label htmlFor={`debrief-${row.id}`}>How the call went</label>
-        <p className="muted" style={{ margin: "3px 0 5px", maxWidth: 720 }}>
+        <p className="hint" style={{ margin: "3px 0 5px", maxWidth: 620 }}>
           {canBook
-            ? "Whoever was in the room usually writes this. It shows on their screen and yours."
-            : "You were on the call, so this is the part only you can answer. It reaches your BD the moment you save it — nothing is emailed."}
+            ? "Whoever was in the room usually writes this."
+            : "You were on the call — this is the part only you can answer."}
         </p>
         {onChange ? (
           <textarea id={`debrief-${row.id}`} rows={3} style={{ width: "100%" }}
@@ -598,6 +909,11 @@ export function WaitingOnTime({ rows, onChange, onRemove, suggested }) {
           <tr>
             <th>Client</th>
             <th>Role</th>
+            {/* Everything the record already knows about the posting they
+                replied about. Without it this table is four words a colleague
+                typed, and answering the client means going back to All jobs to
+                find out which board it came off and when it went. */}
+            <th style={{ minWidth: 200 }}>The posting</th>
             <th>Applied as</th>
             <th style={{ width: 130 }}>Round</th>
             <th style={{ width: 230 }}>Time · ET</th>
@@ -610,12 +926,13 @@ export function WaitingOnTime({ rows, onChange, onRemove, suggested }) {
               <td>{row.client || <span className="muted">—</span>}</td>
               <td className="truncate" style={{ maxWidth: 260 }}>
                 {row.role || <span className="muted">—</span>}
-                {row.job && safeLink(row.job.description_url) && (
-                  <div style={{ fontSize: 11 }}>
-                    <a href={safeLink(row.job.description_url)} target="_blank"
-                       rel="noreferrer noopener">the posting</a>
-                  </div>
-                )}
+              </td>
+              <td>
+                {row.job
+                  ? <JobDetail job={row.job} showTitle />
+                  : <span className="muted" style={{ fontSize: 11 }}>
+                      logged without a posting
+                    </span>}
               </td>
               <td>
                 <b>{row.profile}</b>
@@ -665,9 +982,8 @@ export function StageLadder({ rows }) {
     <section className="card pad stack" style={{ gap: 10 }}>
       <div>
         <h3>Where the conversations get to</h3>
-        <p className="muted" style={{ marginTop: 3, maxWidth: 760 }}>
-          Reached each round, and what happened there. Cleared went on to the next one; lost
-          ended there. The two do not add up to the total, because the rest are still open.
+        <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
+          Reached each round, and what happened there. Cleared went on; lost ended there.
         </p>
       </div>
       <div className="stack" style={{ gap: 7 }}>
@@ -705,6 +1021,193 @@ export function StageLadder({ rows }) {
 
 
 /** Every developer, and whether they are free. The manager's version. */
+/** Take-homes, read-only, for a dashboard rather than for working through.
+ *
+ * Its own widget because a deadline is the one thing in this product that goes
+ * wrong silently. Every other figure understates itself when nobody touches it
+ * — an unreported interview makes a good week look quiet. A missed assessment
+ * does the opposite: nothing changes on any screen, the row sits there looking
+ * exactly as it did yesterday, and the first anybody hears of it is the
+ * client's next email. So the number that leads is `overdue`, and it is shown
+ * even when it is zero on a screen that has any at all.
+ *
+ * `onOpen` points at the screen where they can actually be worked, because a
+ * dashboard that reports a problem without a route to it is a dead end.
+ */
+export function AssessmentBoard({ data, onOpen, heading = "Take-homes and tests",
+                                 note = "", limit = 8 }) {
+  if (!data) return null;
+  const counts = data.counts || {};
+  if (!counts.total) return null;
+
+  // Late first, then whatever is due soonest. The order is the priority — a
+  // dashboard sorted by anything else makes somebody do the sorting.
+  const open = [...(data.open || [])].sort((a, b) => {
+    if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
+    if (!a.due) return 1;
+    if (!b.due) return -1;
+    return a.due.iso.localeCompare(b.due.iso);
+  });
+
+  return (
+    <section className="card pad stack" style={{ gap: 10 }}>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <h3>{heading}</h3>
+          <p className="muted" style={{ marginTop: 3, maxWidth: 720 }}>
+            {note || "The only work here with a deadline on it."}
+          </p>
+        </div>
+        {onOpen && <button className="ghost" onClick={onOpen}>Open them</button>}
+      </div>
+
+      <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
+        <Figure value={counts.overdue} label="past the deadline"
+                tone={counts.overdue ? "var(--brick)" : undefined} />
+        <Figure value={counts.due_soon} label="due within three days" />
+        <Figure value={counts.open} label="still open" />
+        <Figure value={counts.passed} label="cleared" tone={counts.passed ? "var(--pine)" : undefined} />
+      </div>
+
+      {open.length === 0 ? (
+        <p className="muted">
+          Nothing outstanding. {counts.total} recorded in all.
+        </p>
+      ) : (
+        <div className="scroll">
+          <table className="board">
+            <thead>
+              <tr>
+                <th>What</th>
+                <th>Client</th>
+                <th>Applied as</th>
+                <th style={{ width: 150 }}>Due · ET</th>
+                <th style={{ width: 120 }}>How far along</th>
+              </tr>
+            </thead>
+            <tbody>
+              {open.slice(0, limit).map((row) => (
+                <tr key={row.id}>
+                  <td className="truncate" style={{ maxWidth: 280 }}>
+                    {row.title || <span className="muted">untitled</span>}
+                    {row.interview && (
+                      <div className="muted" style={{ fontSize: 11 }}>
+                        after the {STAGE_LABELS[row.interview.stage] || row.interview.stage}
+                      </div>
+                    )}
+                  </td>
+                  <td>{row.client || <span className="muted">—</span>}</td>
+                  <td>
+                    <b>{row.profile}</b>
+                    {row.developer && (
+                      <div className="muted" style={{ fontSize: 11 }}>{row.developer}</div>
+                    )}
+                  </td>
+                  <td>
+                    {row.due ? (
+                      <span style={{
+                        color: row.overdue ? "var(--brick)"
+                          : row.due_soon ? "var(--petrol)" : undefined,
+                      }}>
+                        {row.due.label}
+                        {row.overdue ? " · late" : row.due_soon ? " · soon" : ""}
+                      </span>
+                    ) : <span className="muted">none set</span>}
+                  </td>
+                  <td className={row.overdue ? "pill off" : "pill"}>
+                    {ASSESSMENT_LABELS[row.status] || row.status}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {open.length > limit && (
+        <p className="muted">{open.length - limit} more not shown.</p>
+      )}
+    </section>
+  );
+}
+
+/** One number and what it means. The unit a headline strip is built from. */
+function Figure({ value, label, tone }) {
+  return (
+    <span>
+      <span className="mono" style={{ fontSize: 22, color: tone }}>{value || 0}</span>
+      <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>{label}</span>
+    </span>
+  );
+}
+
+/** Conversations that were cleared and then stopped.
+ *
+ * The single most valuable list in this product, and the only one nothing else
+ * can produce. Every other warning here is about work not done; this is about
+ * work that went *well* and was dropped anyway, because the client said yes and
+ * both sides assumed the other was arranging what came next. On every other
+ * screen these rows read as successes.
+ */
+export function Stalled({ rows, onNextRound, limit = 6 }) {
+  if (!rows?.length) return null;
+  return (
+    <section className="card pad stack" style={{ gap: 10 }}>
+      <div>
+        <h3>Cleared, and nothing booked after</h3>
+        <p className="muted" style={{ marginTop: 3, maxWidth: 720 }}>
+          {rows.length === 1 ? "This conversation" : `These ${rows.length} conversations`} cleared
+          a round and stopped. Booking the next one carries everything across.
+        </p>
+      </div>
+      <div className="scroll">
+        <table className="board">
+          <thead>
+            <tr>
+              <th style={{ width: 128 }}>Last round</th>
+              <th>Client</th>
+              <th>Role</th>
+              <th>Applied as</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.slice(0, limit).map((row) => (
+              <tr key={row.id}>
+                <td>
+                  <span style={{ fontSize: 12 }}>
+                    {STAGE_LABELS[row.stage] || row.stage}
+                  </span>
+                  <div className="muted" style={{ fontSize: 11 }}>{row.when.label}</div>
+                </td>
+                <td>{row.client || <span className="muted">—</span>}</td>
+                <td className="truncate" style={{ maxWidth: 240 }}>
+                  {row.role || <span className="muted">—</span>}
+                </td>
+                <td>
+                  <b>{row.profile}</b>
+                  {row.developer && (
+                    <div className="muted" style={{ fontSize: 11 }}>{row.developer}</div>
+                  )}
+                </td>
+                <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                  {onNextRound && (
+                    <button className="ghost" onClick={() => onNextRound(row)}>
+                      Book the next round
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length > limit && (
+        <p className="muted">{rows.length - limit} more not shown.</p>
+      )}
+    </section>
+  );
+}
+
 export function DeveloperBoard({ rows, onOpen }) {
   return (
     <div className="card scroll">
@@ -718,6 +1221,12 @@ export function DeveloperBoard({ rows, onOpen }) {
             <th className="num">This week</th>
             <th className="num" title="Interviews that have happened with no outcome recorded">
               Unreported
+            </th>
+            {/* A take-home is the other claim on this person's week and the one
+                a calendar cannot show. "Free on Thursday" is not free when a
+                test is due Friday. */}
+            <th className="num" title="Take-homes still open against this developer">
+              Take-homes
             </th>
             <th />
           </tr>
@@ -746,6 +1255,13 @@ export function DeveloperBoard({ rows, onOpen }) {
               <td className="mono num" style={{ color: row.awaiting_outcome ? "var(--brick)" : undefined }}>
                 {row.awaiting_outcome}
               </td>
+              <td className="mono num"
+                  style={{ color: row.assessments_overdue ? "var(--brick)" : undefined }}
+                  title={row.assessments_overdue
+                    ? `${row.assessments_overdue} past the deadline` : undefined}>
+                {row.assessments_open || 0}
+                {row.assessments_overdue ? " !" : ""}
+              </td>
               <td style={{ textAlign: "right" }}>
                 {onOpen && (
                   <button className="ghost" style={{ padding: "5px 9px", fontSize: 12 }}
@@ -755,7 +1271,7 @@ export function DeveloperBoard({ rows, onOpen }) {
             </tr>
           ))}
           {!rows.length && (
-            <tr><td colSpan={7} className="muted">
+            <tr><td colSpan={8} className="muted">
               No developers yet. Add one under People and profiles, then attach it to the
               profile it is sold under.
             </td></tr>

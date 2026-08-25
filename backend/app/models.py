@@ -70,6 +70,21 @@ INTERVIEW_OUTCOMES = ("pending", "passed", "offer", "hired", "rejected")
 # candidate is at — the client is not talking to anybody else while it is out.
 INTERVIEW_STAGES = ("screening", "technical", "assessment", "final", "offer")
 
+
+def next_stage(stage: str) -> str:
+    """The rung after this one, or the top rung if there is nothing above it.
+
+    Used when a round is cleared and the next one is booked from it. A guess
+    rather than a rule — plenty of clients skip the take-home, or run two
+    technical rounds — so it is only ever the value the form opens on, and
+    whoever books it can move it.
+    """
+    try:
+        index = INTERVIEW_STAGES.index(stage)
+    except ValueError:
+        return INTERVIEW_STAGES[0]
+    return INTERVIEW_STAGES[min(index + 1, len(INTERVIEW_STAGES) - 1)]
+
 # A take-home, a test, a written exercise. The BD sets it because the client
 # sent it to them; the developer does it because they are the one who can.
 ASSESSMENT_STATUSES = ("sent", "in_progress", "submitted", "passed", "failed")
@@ -432,6 +447,22 @@ class Interview(Base):
     # whose word it is — usually the developer who was in the room.
     reported_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     reported_at = Column(DateTime, nullable=True)
+    # The round this one follows on from, when it was booked out of a round
+    # that was cleared. Empty for a first conversation and for anything logged
+    # on its own.
+    #
+    # The link is what turns five separate rows into one story. A client who
+    # ran a screening call, a take-home and two technical rounds before saying
+    # no is not the same as four clients who each said no after one call, and
+    # in a flat list of interviews those two look identical. It also stops the
+    # second round being retyped: the client, the role and the posting come
+    # across from the round that earned it.
+    #
+    # ondelete SET NULL rather than CASCADE. Removing a mistyped screening call
+    # must not silently take the real technical round with it — the chain is a
+    # convenience, and losing it costs a breadcrumb, not a record.
+    previous_id = Column(Integer, ForeignKey("interviews.id", ondelete="SET NULL"),
+                         nullable=True, index=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)

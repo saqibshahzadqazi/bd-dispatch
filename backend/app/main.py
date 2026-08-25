@@ -31,7 +31,8 @@ from .models import (ASSESSMENT_CLOSED, ASSESSMENT_STATUSES, AVAILABILITY,
                      INTERVIEW_STAGES, INTERVIEW_STATUSES, MODES, ROLES, SPLIT,
                      Application, Assessment, Assignment, Base, Batch,
                      BatchApplication, Interview, Job, Profile, Setting, Upload,
-                     User, applied_stamp, from_working, utcnow, working_label)
+                     User, applied_stamp, from_working, next_stage, utcnow,
+                     working_label)
 from .schema import bring_up_to_date
 
 def _database_url() -> str:
@@ -334,6 +335,26 @@ class InterviewIn(BaseModel):
     notes: str = ""
     stage: str = "screening"
     job_id: Optional[int] = None
+    # The round this one follows on from, when it was booked out of a round
+    # that was cleared. See POST /api/interviews/{id}/next-round, which is how
+    # it is normally set — this is here so a chain can also be repaired by hand.
+    previous_id: Optional[int] = None
+
+
+class NextRoundIn(BaseModel):
+    """Booking the round after one that was cleared.
+
+    Everything is optional. The point of the endpoint is that a second round
+    should cost one click and no retyping, so every field defaults to what the
+    round before it already knows: same profile, same posting, same client,
+    same role, and the next rung up the ladder.
+    """
+    scheduled_at: Optional[str] = None
+    stage: Optional[str] = None
+    mode: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    link: str = ""
+    notes: str = ""
 
 
 class InterviewPatch(BaseModel):
@@ -1741,6 +1762,15 @@ def create_interview(body: InterviewIn, db: Session = Depends(get_db),
         if job is None:
             raise HTTPException(400, "No such job to attach it to.")
 
+    if body.previous_id is not None:
+        earlier = db.get(Interview, body.previous_id)
+        if earlier is None:
+            raise HTTPException(400, "No such earlier round to follow on from.")
+        if earlier.profile_id != profile.id:
+            raise HTTPException(
+                400, "That earlier round was under a different profile. A chain of rounds "
+                     "is one client talking to one identity.")
+
     # No time yet means a draft, started from the job record while the client's
     # email is still open. It is parked an hour out so every screen has
     # something to sort it by, and counted nowhere until a time is agreed.
@@ -1764,10 +1794,98 @@ def create_interview(body: InterviewIn, db: Session = Depends(get_db),
                     stage=body.stage,
                     status="draft" if draft else "scheduled",
                     link=_check_link(body.link, "meeting link"),
-                    notes=body.notes.strip(), created_by=user.id)
+                    notes=body.notes.strip(), previous_id=body.previous_id,
+                    created_by=user.id)
     db.add(row)
     db.commit()
     return {**_interview_json(db, row), "clash": clash}
+
+
+@app.post("/api/interviews/{interview_id}/next-round", status_code=201)
+def next_round(interview_id: int, body: NextRoundIn, db: Session = Depends(get_db),
+               user: User = Depends(current_user)):
+    """Book the round after this one, carrying everything the client already said.
+
+    The gap this fills is a real one and it loses work. A screening call goes
+    well, somebody sets the outcome to `passed`, and then the second round has
+    to be typed from scratch — same client, same role, same posting, retyped
+    out of memory by whoever gets to it. So it usually is not typed at all for
+    a week, and the client is left waiting on a team that thinks it is winning.
+
+    One press instead. The new round inherits the profile, the posting, the
+    client and the role, comes in one rung up the ladder, and is linked back to
+    the round that earned it so the whole conversation reads as one thing.
+
+    Pressing it also settles the round before, if nobody has said how that one
+    went: you do not book a second round with a client who said no. That is the
+    same rule as putting a time on a draft — the act *is* the statement, and a
+    second click to confirm what just happened is a click somebody forgets,
+    leaving a cleared round sitting in the "nobody said how it went" pile.
+
+    No time is set unless one is given. A client who says "we would like you to
+    meet the team" has not yet said when, and inventing a slot would put a
+    fictional appointment in a developer's diary.
+    """
+    earlier = db.get(Interview, interview_id)
+    if not earlier:
+        raise HTTPException(404, "No such interview.")
+    profile = linked_profile(earlier.profile_id, db, user)
+
+    if earlier.status == "draft":
+        raise HTTPException(
+            400, "That round has no time on it yet, so it has not happened. Give it one "
+                 "before booking what follows it.")
+    if earlier.status == "cancelled":
+        raise HTTPException(
+            400, "That round was called off, so it never happened and nothing followed from "
+                 "it. Log a fresh interview if the client has come back.")
+    if earlier.outcome == "rejected":
+        raise HTTPException(
+            400, "That round was a no. Nothing follows it — log a fresh interview if the "
+                 "client has come back with something else.")
+
+    stage = body.stage or next_stage(earlier.stage or "screening")
+    if stage not in INTERVIEW_STAGES:
+        raise HTTPException(400, f"Stage must be one of {', '.join(INTERVIEW_STAGES)}.")
+    mode = body.mode or earlier.mode
+    if mode not in INTERVIEW_MODES:
+        raise HTTPException(400, f"Mode must be one of {', '.join(INTERVIEW_MODES)}.")
+
+    draft = not (body.scheduled_at or "").strip()
+    when = _naive_utc(utcnow() + dt.timedelta(hours=1)) if draft else _when(body.scheduled_at)
+    minutes = min(600, max(5, body.duration_minutes or earlier.duration_minutes or 30))
+    clash = None if draft else _clash(db, profile, when, minutes)
+
+    row = Interview(profile_id=earlier.profile_id, job_id=earlier.job_id,
+                    client=earlier.client, role=earlier.role,
+                    scheduled_at=when, duration_minutes=minutes, mode=mode,
+                    stage=stage, status="draft" if draft else "scheduled",
+                    link=_check_link(body.link, "meeting link"),
+                    notes=body.notes.strip(), previous_id=earlier.id,
+                    created_by=user.id)
+    db.add(row)
+
+    # Booking what comes next is the statement that this one was cleared —
+    # but only once it has actually happened. A client who says at booking time
+    # that there will be two rounds is not a report on the first one, and
+    # marking a call next Tuesday `done` today would be a lie the diary then
+    # tells everybody.
+    #
+    # Only ever fills a blank, either way: an outcome somebody already recorded
+    # — an offer, a hire — is theirs and a scheduling action does not overwrite
+    # it.
+    happened = _naive_utc(earlier.scheduled_at) < _naive_utc(utcnow())
+    if happened:
+        if earlier.outcome == "pending":
+            earlier.outcome = "passed"
+            earlier.reported_by = user.id
+            earlier.reported_at = _naive_utc(utcnow())
+        if earlier.status == "scheduled":
+            earlier.status = "done"
+
+    db.commit()
+    return {**_interview_json(db, row), "clash": clash,
+            "previous": _interview_json(db, earlier)}
 
 
 @app.patch("/api/interviews/{interview_id}")
@@ -1873,6 +1991,14 @@ def delete_interview(interview_id: int, db: Session = Depends(get_db),
     linked_profile(row.profile_id, db, user)
     if user.role != "admin" and row.created_by != user.id:
         raise HTTPException(403, "Cancel it instead, or ask whoever logged it to remove it.")
+
+    # Anything booked out of this one survives it, standing on its own. The
+    # link is a convenience and losing it costs a breadcrumb; taking a real
+    # second round away with a mistyped first one would cost the work. Done
+    # here rather than left to the FK, because SQLite does not enforce ON
+    # DELETE unless the pragma is on and this must be true either way.
+    db.execute(update(Interview).where(Interview.previous_id == row.id)
+               .values(previous_id=None))
     db.delete(row)
     db.commit()
     return {"ok": True}
@@ -2061,6 +2187,38 @@ def download_report(batch_id: int, db: Session = Depends(get_db), _: User = Depe
         data["matrix"]["names"], data["matrix"]["rows"])
     return Response(payload, media_type=XLSX,
                     headers={"Content-Disposition": f'attachment; filename="dispatch-batch-{batch_id}.xlsx"'})
+
+
+@app.get("/api/pipeline.xlsx")
+def download_pipeline(profile_id: Optional[int] = None, db: Session = Depends(get_db),
+                      user: User = Depends(current_user)):
+    """Every conversation and take-home, as a spreadsheet.
+
+    Scoped exactly like the screens it comes from: a BD gets the profiles they
+    run, a developer the ones they are sold under, a manager the workspace. The
+    same rule everywhere means nobody has to wonder what a downloaded file
+    contains before sending it on.
+
+    Not filtered to a cycle, for the reason nothing about interviews ever is: a
+    reply that lands three weeks late belongs to the work that earned it, not
+    to whichever cycle happened to be open when the client got round to it.
+    """
+    if profile_id is not None:
+        linked_profile(profile_id, db, user)
+        ids: Optional[list[int]] = [profile_id]
+    else:
+        ids = visible_profile_ids(db, user)
+
+    conversations = interviews.decorate(db, interviews.load(db, ids))
+    tests = assessments.decorate(db, assessments.load(db, ids))
+    if not conversations and not tests:
+        raise HTTPException(404, "Nothing has come back yet, so there is nothing to export.")
+
+    payload = exports.pipeline_workbook(conversations, tests)
+    stamp = working_label(utcnow())["day"]
+    return Response(payload, media_type=XLSX,
+                    headers={"Content-Disposition":
+                             f'attachment; filename="pipeline-{stamp}.xlsx"'})
 
 
 @app.get("/api/health")

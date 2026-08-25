@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { api, setToken } from "../api.js";
+import { ThemeToggle } from "./shell.jsx";
 
 export default function Login({ onSignedIn }) {
   const [email, setEmail] = useState("");
@@ -22,10 +23,10 @@ export default function Login({ onSignedIn }) {
   };
 
   return (
-    <div className="wrap" style={{ maxWidth: 380, paddingTop: 90 }}>
-      <h1>Dispatch</h1>
-      <p className="muted" style={{ marginTop: 6, marginBottom: 22 }}>
-        Upload your applied-jobs sheet, collect a list nobody else is working.
+    <div className="wrap enter" style={{ maxWidth: 360, paddingTop: "14vh" }}>
+      <h1 style={{ fontSize: 26 }}>Dispatch</h1>
+      <p className="muted" style={{ marginTop: 6, marginBottom: 20 }}>
+        Hand in your sheet, collect a list nobody else is working.
       </p>
 
       <div className="card pad stack" style={{ gap: 13 }}>
@@ -44,9 +45,16 @@ export default function Login({ onSignedIn }) {
                  onKeyDown={(e) => e.key === "Enter" && submit()} />
         </div>
         {error && <div className="notice">{error}</div>}
-        <button onClick={submit} disabled={busy || !email || !password}>
+        <button onClick={submit} disabled={busy || !email || !password}
+                style={{ width: "100%" }}>
           {busy ? "Signing in…" : "Sign in"}
         </button>
+      </div>
+
+      {/* Available before anybody signs in, because the sign-in screen is the
+          first thing a dark room sees. */}
+      <div className="row" style={{ marginTop: 14, justifyContent: "center" }}>
+        <ThemeToggle />
       </div>
     </div>
   );

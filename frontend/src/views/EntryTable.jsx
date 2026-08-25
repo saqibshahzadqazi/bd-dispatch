@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
+import { Loading } from "./widgets.jsx";
 
 const COLUMNS = [
   { key: "url", label: "Job link", width: "26%", hint: "https://…" },
@@ -137,7 +138,7 @@ export default function EntryTable({ batchId, profileId, profileName, onSaved })
   const filled = rows.filter((r) => !isEmpty(r)).length;
   const noLink = rows.filter((r) => !isEmpty(r) && !String(r.url || "").trim()).length;
 
-  if (state === "loading") return <p className="muted">Loading what you have so far…</p>;
+  if (state === "loading") return <Loading lines={3} />;
 
   return (
     <div className="stack" style={{ gap: 10 }}>
@@ -206,13 +207,9 @@ export default function EntryTable({ batchId, profileId, profileName, onSaved })
         </div>
       )}
 
-      <p className="muted">
-        Press <b>Enter</b> on the last row to add another. You can also copy a block of cells
-        straight out of Excel and paste it into the first cell — it will fill across and down.
-        <br />
-        <b>Applied on</b> is stamped for you in Eastern time the moment you add a row, so there
-        is nothing to fill in. Overwrite it if you are catching up on something you applied to
-        earlier.
+      <p className="hint" style={{ marginTop: 3 }}>
+        <b>Enter</b> on the last row adds another. Paste a block straight from
+        Excel and it fills across.
       </p>
     </div>
   );

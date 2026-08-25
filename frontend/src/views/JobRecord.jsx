@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, safeUrl } from "../api.js";
-import { STAGE_LABELS } from "./widgets.jsx";
+import { Loading, STAGE_LABELS } from "./widgets.jsx";
+import { useToast } from "./shell.jsx";
 
 /** Every job ever applied for, searchable, with an interview one click away.
  *
@@ -23,8 +24,10 @@ export default function JobRecord({ profiles = [], onOpenInterviews }) {
   const [data, setData] = useState(null);
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState(null);
+  const toast = useToast();
   const [starting, setStarting] = useState(null);   // the row being turned into one
+  // Something was started this session, so offer the way to it.
+  const [started, setStarted] = useState(false);
   const [stage, setStage] = useState("screening");
   const typing = useRef(null);
 
@@ -35,7 +38,7 @@ export default function JobRecord({ profiles = [], onOpenInterviews }) {
         q: search, profileId: who || null, limit: PAGE, offset: at * PAGE,
       }));
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
     } finally {
       setBusy(false);
     }
@@ -55,7 +58,6 @@ export default function JobRecord({ profiles = [], onOpenInterviews }) {
 
   const start = async (row) => {
     setBusy(true);
-    setNote(null);
     try {
       const made = await api.createInterview({
         profile_id: row.profile_id,
@@ -66,13 +68,12 @@ export default function JobRecord({ profiles = [], onOpenInterviews }) {
         scheduled_at: "",
       });
       setStarting(null);
-      setNote({
-        text: `${made.client || "That job"} is waiting on a time under ${made.profile}. `
-          + "Everything else came across from the record.",
-        go: true,
-      });
+      // The toast says what happened; the route to it is the button below,
+      // which is where somebody would look for it anyway.
+      toast(`${made.client || "That job"} is waiting on a time under ${made.profile}.`);
+      setStarted(true);
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
     } finally {
       setBusy(false);
     }
@@ -85,11 +86,9 @@ export default function JobRecord({ profiles = [], onOpenInterviews }) {
     <section className="stack" style={{ gap: 12 }}>
       <div>
         <h2>Every job applied for</h2>
-        <p className="muted" style={{ marginTop: 3, maxWidth: 760 }}>
-          The whole record, all the way back — not just this cycle. A client replying three
-          weeks late is replying to work from a cycle that closed, so this is the only screen
-          that still has it. Search for what they mentioned, then start the interview from the
-          row rather than retyping it.
+        <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
+          Everything ever applied for, all the way back. Search what the client
+          mentioned, then start the interview from the row.
         </p>
       </div>
 
@@ -121,17 +120,15 @@ export default function JobRecord({ profiles = [], onOpenInterviews }) {
         </div>
       </div>
 
-      {note && (
-        <div className={note.bad ? "notice" : "notice ok"}>
-          {note.text}
-          {note.go && onOpenInterviews && (
-            <> <button className="link" onClick={onOpenInterviews}>Open interviews</button></>
-          )}
+      {started && onOpenInterviews && (
+        <div className="notice gate">
+          Waiting on a time.{" "}
+          <button className="link" onClick={onOpenInterviews}>Open interviews</button>
         </div>
       )}
 
       {!data ? (
-        <p className="muted">Loading the record…</p>
+        <Loading lines={4} />
       ) : data.rows.length === 0 ? (
         <div className="card pad muted">
           {q ? `Nothing in the record matches “${q}”. Try the client name on its own — a job `
@@ -196,11 +193,9 @@ export default function JobRecord({ profiles = [], onOpenInterviews }) {
                               <b style={{ fontFamily: "var(--display)" }}>
                                 Start a conversation on this one
                               </b>
-                              <p className="muted" style={{ marginTop: 3, maxWidth: 700 }}>
-                                The title, the client and both links come across as they are.
-                                No time is set — it waits under <b>Interviews</b> until you have
-                                agreed one with the client, and counts towards nothing until
-                                then.
+                              <p className="hint" style={{ marginTop: 3, maxWidth: 620 }}>
+                                The posting comes across as it is. No time is set —
+                                it waits under <b>Interviews</b> until you agree one.
                               </p>
                             </div>
                             <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>

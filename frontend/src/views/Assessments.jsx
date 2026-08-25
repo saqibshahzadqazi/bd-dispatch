@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, safeUrl } from "../api.js";
-import { STAGE_LABELS } from "./widgets.jsx";
+import { JobDetail, JobPicker, Loading, STAGE_LABELS } from "./widgets.jsx";
+import { useToast } from "./shell.jsx";
 
 /** Take-homes and tests: set by the BD, done by the developer.
  *
@@ -31,6 +32,12 @@ const BLANK = {
   link: "",
   due_at: "",
   interview_id: "",
+  // The posting the test came out of. Inherited from the interview when one is
+  // named, and pickable directly for a client that screened with a take-home
+  // before anybody spoke. `job` is the whole record row so the form can show
+  // what was picked; only `job_id` goes to the server.
+  job_id: null,
+  job: null,
 };
 
 export default function Assessments({
@@ -44,7 +51,7 @@ export default function Assessments({
   const [diary, setDiary] = useState(null);
   const [form, setForm] = useState(BLANK);
   const [adding, setAdding] = useState(false);
-  const [note, setNote] = useState(null);
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(null);
 
@@ -62,7 +69,7 @@ export default function Assessments({
         ? current
         : { ...current, due_at: next.suggested_due }));
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
     }
   }, [profileId]);
 
@@ -80,22 +87,36 @@ export default function Assessments({
     }
   }, [profiles, form.profile_id]);
 
+  /* Search the record for the posting this test came out of.
+   *
+   * Scoped to the profile the form is on, for the same reason the diary's
+   * picker is: a job the *other* identity applied to is not this
+   * conversation. */
+  const findJobs = useCallback(
+    (q) => (form.profile_id
+      ? api.jobRecord({ q, profileId: Number(form.profile_id), limit: 8 })
+        .then((found) => found.rows)
+      : Promise.resolve([])),
+    [form.profile_id]
+  );
+
   const create = async () => {
     setBusy(true);
-    setNote(null);
     try {
+      // `job` is only here so the form can show what was picked.
+      const { job, ...payload } = form;
       const made = await api.createAssessment({
-        ...form,
+        ...payload,
         profile_id: Number(form.profile_id),
         interview_id: form.interview_id ? Number(form.interview_id) : null,
       });
       setForm({ ...BLANK, profile_id: form.profile_id, due_at: data?.suggested_due || "" });
       setAdding(false);
       await load();
-      setNote({ text: `${made.title} is on ${made.developer || made.profile}'s screen`
-        + `${made.due ? `, due ${made.due.label} Eastern` : ", with no deadline"}.` });
+      toast(`${made.title} is on ${made.developer || made.profile}'s screen`
+        + `${made.due ? ` · due ${made.due.label} ET` : ""}.`);
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
     } finally {
       setBusy(false);
     }
@@ -107,7 +128,7 @@ export default function Assessments({
       await load();
       return saved;
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
       return null;
     }
   };
@@ -121,11 +142,11 @@ export default function Assessments({
       await api.deleteAssessment(row.id);
       await load();
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
     }
   };
 
-  if (!data) return <p className="muted">Loading what has been set…</p>;
+  if (!data) return <Loading lines={4} />;
 
   const { counts } = data;
   // Only calls that have been and gone can have produced a take-home.
@@ -145,13 +166,9 @@ export default function Assessments({
         )}
       </div>
 
-      {note && <div className={note.bad ? "notice" : "notice ok"}>{note.text}</div>}
-
       {counts.overdue > 0 && (
         <div className="notice">
-          <b>{counts.overdue} {counts.overdue === 1 ? "is" : "are"} past the deadline</b> and
-          still open. A missed take-home costs the interview that earned it, so this is worth
-          clearing before anything else on this screen.
+          <b>{counts.overdue} past the deadline.</b> Worth clearing before anything else here.
         </div>
       )}
 
@@ -159,19 +176,21 @@ export default function Assessments({
         <div className="card pad stack" style={{ gap: 12 }}>
           <div>
             <h3>A client has sent something to do</h3>
-            <p className="muted" style={{ marginTop: 3, maxWidth: 720 }}>
-              The deadline is <b>Eastern</b>, like every other time in this app. Leave it empty
-              if the client did not give one — an invented deadline puts a red flag on
-              somebody&apos;s screen that nobody set.
+            <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
+              Deadline is <b>Eastern</b>. Leave it empty if the client gave none.
             </p>
           </div>
 
           <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))" }}>
             <div>
               <label htmlFor="as-profile">Applying as</label>
+              {/* Changing the identity drops any posting already attached —
+                  a job the other profile applied to is not this test. */}
               <select id="as-profile" style={{ width: "100%", marginTop: 4 }}
                       value={form.profile_id}
-                      onChange={(e) => setForm({ ...form, profile_id: e.target.value })}>
+                      onChange={(e) => setForm({
+                        ...form, profile_id: e.target.value, job: null, job_id: null,
+                      })}>
                 {profiles.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}{p.headline ? ` · ${p.headline}` : ""}
@@ -206,9 +225,15 @@ export default function Assessments({
             {sittings.length > 0 && (
               <div style={{ gridColumn: "span 2" }}>
                 <label htmlFor="as-interview">Came out of</label>
+                {/* Naming a call means the posting comes across with it, so
+                    a hand-picked one is dropped rather than left to win a
+                    quiet argument with the interview's own. */}
                 <select id="as-interview" style={{ width: "100%", marginTop: 4 }}
-                        value={form.interview_id}
-                        onChange={(e) => setForm({ ...form, interview_id: e.target.value })}>
+                        onChange={(e) => setForm({
+                          ...form, interview_id: e.target.value,
+                          ...(e.target.value ? { job: null, job_id: null } : {}),
+                        })}
+                        value={form.interview_id}>
                   <option value="">nothing — the client sent it cold</option>
                   {sittings.map((row) => (
                     <option key={row.id} value={row.id}>
@@ -227,6 +252,36 @@ export default function Assessments({
                         onChange={(e) => setForm({ ...form, brief: e.target.value })} />
             </div>
           </div>
+
+          {/* Named a call above and the posting comes with it — the interview
+              already knows which one. This is for the other case, and it is
+              common: plenty of clients screen with a take-home before anybody
+              speaks, and there is no call for that test to hang off. */}
+          {!form.interview_id && (
+            <div>
+              <label>Which job is this test for?</label>
+              <div style={{ marginTop: 4 }}>
+                <JobPicker
+                  value={form.job}
+                  disabled={!form.profile_id}
+                  onSearch={findJobs}
+                  onPick={(row) => setForm((current) => ({
+                    ...current,
+                    job: row,
+                    job_id: row.job_id,
+                    // Only ever fills a blank. What was copied out of the
+                    // client's email beats what the sheet recorded.
+                    client: current.client || row.company || "",
+                    title: current.title
+                      || (row.title ? `Take-home · ${row.title}` : ""),
+                  }))}
+                  onClear={() => setForm((current) => ({
+                    ...current, job: null, job_id: null,
+                  }))}
+                />
+              </div>
+            </div>
+          )}
 
           <div className="row">
             <button onClick={create} disabled={busy || !form.profile_id}>
@@ -276,13 +331,17 @@ function Section({ title, rows, canSet, open, setOpen, onChange, onRemove, empty
               {rows.map((row) => (
                 <React.Fragment key={row.id}>
                   <tr style={{ opacity: row.status === "failed" ? 0.6 : 1 }}>
-                    <td className="truncate" style={{ maxWidth: 300 }}>
-                      {row.title}
+                    <td style={{ maxWidth: 300 }}>
+                      <div className="truncate">{row.title}</div>
                       {row.interview && (
                         <div className="muted" style={{ fontSize: 11 }}>
                           after the {STAGE_LABELS[row.interview.stage] || row.interview.stage}
                         </div>
                       )}
+                      {/* The posting it is a test for. The same block the
+                          diary shows, so the two screens describing one
+                          conversation cannot describe it differently. */}
+                      <JobDetail job={row.job} />
                     </td>
                     <td>{row.client || <span className="muted">—</span>}</td>
                     <td>
@@ -374,13 +433,11 @@ function Detail({ row, canSet, onChange, onClose }) {
           {row.brief || "No brief was written down."}
         </p>
         {row.job && (
-          <p className="muted" style={{ marginTop: 5 }}>
-            From <b>{row.job.title || "a job"}</b>
-            {safeUrl(row.job.description_url) && (
-              <> · <a href={safeUrl(row.job.description_url)} target="_blank"
-                      rel="noreferrer noopener">the original posting</a></>
-            )}
-          </p>
+          <div style={{ marginTop: 6 }}>
+            <span className="muted">For <b>{row.job.title || "a job"}</b>
+              {row.job.company ? ` at ${row.job.company}` : ""}</span>
+            <JobDetail job={row.job} />
+          </div>
         )}
         {row.set_by && (
           <p className="muted" style={{ marginTop: 3, fontSize: 12 }}>Set by {row.set_by}.</p>

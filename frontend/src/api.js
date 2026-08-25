@@ -141,6 +141,11 @@ export const api = {
   updateInterview: (id, payload) =>
     request(`/interviews/${id}`, { method: "PATCH", body: payload }),
   deleteInterview: (id) => request(`/interviews/${id}`, { method: "DELETE" }),
+  // Book the round after one that was cleared. The client, the role and the
+  // posting come across from it, and the round before is marked passed —
+  // booking the next one is what says the last one went well.
+  nextRound: (id, payload = {}) =>
+    request(`/interviews/${id}/next-round`, { method: "POST", body: payload }),
 
   // Every job applied for, all-time and searchable. Not scoped to a cycle: a
   // client's reply arrives long after the cycle that earned it closed.
@@ -160,6 +165,11 @@ export const api = {
   updateAssessment: (id, payload) =>
     request(`/assessments/${id}`, { method: "PATCH", body: payload }),
   deleteAssessment: (id) => request(`/assessments/${id}`, { method: "DELETE" }),
+
+  // Every conversation and take-home as a spreadsheet, scoped from the token
+  // like the screens are. Used with `download`, not `request`.
+  pipelinePath: (profileId) =>
+    `/pipeline.xlsx${profileId ? `?profile_id=${profileId}` : ""}`,
 
   // A developer's own screen, and a manager looking at one.
   devDashboard: (batchId) => request(`/dashboard/dev${query(batchId)}`),

@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../api.js";
-import { Funnel, InterviewRows, StageLadder, WaitingOnTime } from "./widgets.jsx";
+import { api, download } from "../api.js";
+import { useToast } from "./shell.jsx";
+import {
+  Funnel, InterviewRows, JobPicker, Loading, STAGE_LABELS, StageLadder, Stalled, WaitingOnTime,
+} from "./widgets.jsx";
 
 /** Scheduling, and the list of what is scheduled.
  *
@@ -34,6 +37,10 @@ const BLANK = {
   link: "",
   notes: "",
   stage: "screening",
+  // The posting they replied about, when there is one. `job` is the whole row
+  // so the form can show what was picked; only `job_id` goes to the server.
+  job_id: null,
+  job: null,
 };
 
 /* The picker starts on `suggested_time` from the server — an hour from now on
@@ -53,7 +60,7 @@ export default function Interviews({
 }) {
   const [data, setData] = useState(null);
   const [form, setForm] = useState(BLANK);
-  const [note, setNote] = useState(null);
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
 
@@ -67,7 +74,7 @@ export default function Interviews({
         ? current
         : { ...current, scheduled_at: next.suggested_time }));
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
     }
   }, [profileId]);
 
@@ -93,12 +100,28 @@ export default function Interviews({
     [profiles]
   );
 
+  /* Search the record for the posting a client is replying about.
+   *
+   * Scoped to the profile the form is on, because a job the *other* profile
+   * applied to is not this conversation — attaching it would put a stranger's
+   * application behind this interview. Re-made when that profile changes so a
+   * stale closure cannot search the wrong one. */
+  const findJobs = useCallback(
+    (q) => (form.profile_id
+      ? api.jobRecord({ q, profileId: Number(form.profile_id), limit: 8 })
+        .then((found) => found.rows)
+      : Promise.resolve([])),
+    [form.profile_id]
+  );
+
   const schedule = async () => {
     setBusy(true);
-    setNote(null);
     try {
+      // `job` is the whole record row and is only here so the form can show
+      // what was picked. The server wants the id.
+      const { job, ...payload } = form;
       const made = await api.createInterview({
-        ...form,
+        ...payload,
         profile_id: Number(form.profile_id),
         duration_minutes: Number(form.duration_minutes) || 30,
       });
@@ -106,15 +129,14 @@ export default function Interviews({
                 profile_id: form.profile_id });
       setAdding(false);
       await load();
-      setNote(made.clash
-        ? {
-          bad: true,
-          text: `Booked — but ${made.clash.profile} already has ${made.clash.client || "an interview"} `
-            + `at ${made.clash.when.label}. That is the same person twice over. Move one of them.`,
-        }
-        : { text: `${made.client || "The interview"} is in the diary for ${made.when.label}, Eastern.` });
+      if (made.clash) {
+        toast(`${made.clash.profile} already has ${made.clash.client || "an interview"} at `
+          + `${made.clash.when.label} — the same person twice over.`, "bad");
+      } else {
+        toast(`${made.client || "Booked"} · ${made.when.label} ET`);
+      }
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
     } finally {
       setBusy(false);
     }
@@ -125,15 +147,36 @@ export default function Interviews({
       const saved = await api.updateInterview(id, patch);
       await load();
       if (saved.clash) {
-        setNote({ bad: true, text: `Moved — but that now overlaps ${saved.clash.client || "another interview"} `
-          + `at ${saved.clash.when.label}.` });
+        toast(`That now overlaps ${saved.clash.client || "another interview"} at `
+          + `${saved.clash.when.label}.`, "bad");
       }
       return saved;
     } catch (err) {
       // Shown rather than thrown: the notes panel awaits this to decide whether
       // to close, and a rejection there would close on a save that never landed.
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
       return null;
+    }
+  };
+
+  /* Book the round after one that was cleared.
+   *
+   * No form. The whole value of it is that a second round costs one press and
+   * no retyping — the client, the role and the posting come across from the
+   * round that earned it, and it lands in "waiting on a time" like any other
+   * reply with no hour agreed yet. Putting a time on it there is what books
+   * it, which is the same single step as every other draft in this app. */
+  const advance = async (row) => {
+    setBusy(true);
+    try {
+      const made = await api.nextRound(row.id);
+      await load();
+      toast(`${STAGE_LABELS[made.stage] || made.stage} added for `
+        + `${made.client || made.profile} — waiting on a time.`);
+    } catch (err) {
+      toast(err.message, "bad");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -146,11 +189,11 @@ export default function Interviews({
       await api.deleteInterview(row.id);
       await load();
     } catch (err) {
-      setNote({ bad: true, text: err.message });
+      toast(err.message, "bad");
     }
   };
 
-  if (!data) return <p className="muted">Loading the diary…</p>;
+  if (!data) return <Loading lines={5} />;
 
   const ready = form.profile_id && form.scheduled_at;
   const chosen = byId[form.profile_id];
@@ -162,21 +205,28 @@ export default function Interviews({
           <h2>{heading}</h2>
           {intro && <p className="muted" style={{ marginTop: 3 }}>{intro}</p>}
         </div>
-        {canSchedule && profiles.length > 0 && (
-          <button className={adding ? "ghost" : ""} onClick={() => setAdding((on) => !on)}>
-            {adding ? "Never mind" : "Log an interview"}
-          </button>
-        )}
+        <div className="row" style={{ gap: 8 }}>
+          {/* Everything above counts what went out and has had an export for
+              a long time. This is the half that says what came back, and it
+              is the half somebody is asked about at the end of a quarter. */}
+          {(data?.counts.total > 0 || data?.counts.awaiting_time > 0) && (
+            <button className="ghost" onClick={() =>
+              download(api.pipelinePath(profileId), "pipeline.xlsx")
+                .catch((err) => toast(err.message, "bad"))}>
+              Download as Excel
+            </button>
+          )}
+          {canSchedule && profiles.length > 0 && (
+            <button className={adding ? "ghost" : ""} onClick={() => setAdding((on) => !on)}>
+              {adding ? "Never mind" : "Log an interview"}
+            </button>
+          )}
+        </div>
       </div>
 
-      {note && <div className={note.bad ? "notice" : "notice ok"}>{note.text}</div>}
-
       {!canSchedule && (
-        <p className="muted" style={{ maxWidth: 760 }}>
-          Your BD books these — the client replied to the account they run, and one side
-          holding the diary is what stops one reply being logged twice at two different
-          times. Forward anything that reaches you directly and it turns up here. Saying
-          how a call went, and writing the note under <b>notes</b>, is yours.
+        <p className="hint" style={{ maxWidth: 640 }}>
+          Your BD books these. Saying how a call went is yours.
         </p>
       )}
 
@@ -184,18 +234,23 @@ export default function Interviews({
         <div className="card pad stack" style={{ gap: 12 }}>
           <div>
             <h3>A client wants to talk</h3>
-            <p className="muted" style={{ marginTop: 3, maxWidth: 700 }}>
-              The time is <b>Eastern</b>, whatever clock you are reading. Everyone who opens
-              this sees the same hour, so type what you agreed with the client.
+            <p className="hint" style={{ marginTop: 3 }}>
+              Times are <b>Eastern</b> — type what you agreed with the client.
             </p>
           </div>
 
           <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))" }}>
             <div>
               <label htmlFor="iv-profile">Applying as</label>
+              {/* Changing the identity drops any posting already attached.
+                  A job the *other* profile applied to is not this
+                  conversation, and carrying it over would put a stranger's
+                  application behind this interview. */}
               <select id="iv-profile" style={{ width: "100%", marginTop: 4 }}
                       value={form.profile_id}
-                      onChange={(e) => setForm({ ...form, profile_id: e.target.value })}>
+                      onChange={(e) => setForm({
+                        ...form, profile_id: e.target.value, job: null, job_id: null,
+                      })}>
                 {profiles.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}{p.headline ? ` · ${p.headline}` : ""}
@@ -262,16 +317,42 @@ export default function Interviews({
             </div>
           </div>
 
+          {/* The same thing pressing *they replied* on the job record does,
+              from the other direction. Both ways in should produce the same
+              row, rather than one that carries the posting and one typed out
+              of memory a fortnight later. */}
+          <div>
+            <label>Which job did they reply about?</label>
+            <div style={{ marginTop: 4 }}>
+              <JobPicker
+                value={form.job}
+                disabled={!form.profile_id}
+                onSearch={findJobs}
+                onPick={(row) => setForm((current) => ({
+                  ...current,
+                  job: row,
+                  job_id: row.job_id,
+                  // Only ever fills a blank. What somebody typed out of the
+                  // client's email is theirs and may well be better than what
+                  // the sheet recorded.
+                  client: current.client || row.company || "",
+                  role: current.role || row.title || "",
+                }))}
+                onClear={() => setForm((current) => ({
+                  ...current, job: null, job_id: null,
+                }))}
+              />
+            </div>
+          </div>
+
           {chosen?.developer && (
-            <p className="muted">
-              This lands in <b>{chosen.developer}</b>&apos;s diary. They will see it on their own
-              screen without anybody telling them.
+            <p className="hint">
+              Lands in <b>{chosen.developer}</b>&apos;s diary. Nothing is emailed.
             </p>
           )}
           {chosen && !chosen.developer && (
             <div className="notice">
-              No developer is attached to {chosen.name}, so this interview reaches nobody
-              automatically. Ask your manager to say who is behind that profile.
+              Nobody is attached to {chosen.name}, so this reaches no one.
             </div>
           )}
 
@@ -299,11 +380,8 @@ export default function Interviews({
         <div className="stack" style={{ gap: 8 }}>
           <div>
             <h3>Waiting on a time</h3>
-            <p className="muted" style={{ margin: "3px 0 0", maxWidth: 760 }}>
-              Replies somebody started from the job record. Each one is a client who has
-              answered and is waiting to hear back, and none of them counts towards any figure
-              on this screen until a time is agreed. Put one in and it becomes a real booking
-              — there is no second button.
+            <p className="hint" style={{ margin: "3px 0 0" }}>
+              Clients who answered and are waiting. Adding a time books it.
             </p>
           </div>
           <WaitingOnTime rows={data.awaiting_time} onChange={change}
@@ -315,11 +393,12 @@ export default function Interviews({
       {data.counts.awaiting_outcome > 0 && (
         <div className="notice">
           <b>{data.counts.awaiting_outcome} interview
-          {data.counts.awaiting_outcome === 1 ? " has" : "s have"} happened without an outcome.</b>{" "}
-          Say how they went below. Until somebody does, every rate on every screen here reads
-          lower than the truth.
+          {data.counts.awaiting_outcome === 1 ? "" : "s"} with no outcome.</b> Every rate here
+          reads low until somebody says.
         </div>
       )}
+
+      <Stalled rows={data.stalled} onNextRound={advance} />
 
       <div>
         <h3>Today</h3>
@@ -330,7 +409,8 @@ export default function Interviews({
         </p>
         {data.today.length > 0 && (
           <InterviewRows rows={data.today} showProfile={showProfile} canBook={canSchedule}
-                         onChange={change} onRemove={canSchedule ? remove : undefined} />
+                         onChange={change} onRemove={canSchedule ? remove : undefined}
+                         onNextRound={advance} />
         )}
       </div>
 
@@ -339,17 +419,18 @@ export default function Interviews({
         <p className="muted" style={{ margin: "3px 0 8px" }}>The next fortnight.</p>
         <InterviewRows rows={data.upcoming} showProfile={showProfile} canBook={canSchedule}
                        onChange={change} onRemove={canSchedule ? remove : undefined}
+                       onNextRound={advance}
                        empty="Nothing booked in the next fortnight." />
       </div>
 
       <div>
         <h3>What happened</h3>
-        <p className="muted" style={{ margin: "3px 0 8px" }}>
-          The last {Math.max(data.recent.length, 1)} that have been and gone. Recording the
-          outcome is what turns a pile of applications into a number worth steering by.
+        <p className="hint" style={{ margin: "3px 0 8px" }}>
+          Been and gone. Recording the outcome is what makes the rates true.
         </p>
         <InterviewRows rows={data.recent} showProfile={showProfile} canBook={canSchedule}
                        onChange={change} onRemove={canSchedule ? remove : undefined}
+                       onNextRound={advance}
                        empty="Nothing has happened yet." />
       </div>
     </section>

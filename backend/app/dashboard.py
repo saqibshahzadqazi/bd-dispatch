@@ -31,7 +31,7 @@ from typing import Optional, Sequence
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import interviews
+from . import assessments, interviews
 from .models import (Application, Assignment, Batch, BatchApplication, Job,
                      Profile, Upload, User, to_working, working_today)
 
@@ -187,10 +187,16 @@ def profile_rows(db: Session, profiles: Sequence[Profile], batch_id: Optional[in
     stats = cycle_stats(db, batch_id)
     totals = all_time(db)
     latest = last_logged(db)
+    # Take-homes outstanding against each identity. On the row rather than in a
+    # separate block, because a board that shows how much a profile applied for
+    # while saying nothing about the test it owes a client is showing the half
+    # of the picture that cannot lose the work.
+    tests = assessments.by_profile(db, [p.id for p in profiles] if profiles else [])
 
     rows = []
     for profile in profiles:
         stamp = latest.get(profile.id)
+        theirs = tests.get(profile.id) or {}
         rows.append({
             "profile_id": profile.id,
             "name": profile.name,
@@ -208,6 +214,8 @@ def profile_rows(db: Session, profiles: Sequence[Profile], batch_id: Optional[in
             "shared": profile.share_progress is not False,
             "all_time": totals.get(profile.id, 0),
             "last_logged": stamp.isoformat() if stamp else None,
+            "assessments_open": theirs.get("open", 0),
+            "assessments_overdue": theirs.get("overdue", 0),
             **(stats.get(profile.id) or blank_stats()),
         })
     rows.sort(key=lambda row: (-row["applied"], -row["logged"], row["name"]))
@@ -340,6 +348,10 @@ def for_person(db: Session, user: User, batch: Optional[Batch],
             # was worth sending.
             "interviews": interviews.summary(db, ids),
             "funnel": interviews.funnel(db, ids),
+            # The third thing a client can ask for, and the one with a deadline
+            # on it. A BD who cannot see it here finds out a take-home was
+            # missed from the client's next email.
+            "assessments": assessments.summary(db, ids),
             "team_visible": team_visible}
 
 
@@ -439,6 +451,7 @@ def overview(db: Session, batch: Optional[Batch]) -> dict:
             # sent; this says what came back, and who is free to take it.
             "interviews": interviews.summary(db),
             "funnel": interviews.funnel(db),
+            "assessments": assessments.summary(db),
             "developers": interviews.developer_rows(db)}
 
 
@@ -502,6 +515,7 @@ def profile_detail(db: Session, profile: Profile, batch: Optional[Batch]) -> dic
         "recent": recent, "cycles": per_cycle,
         "interviews": interviews.summary(db, [profile.id]),
         "funnel": interviews.funnel(db, [profile.id]),
+        "assessments": assessments.summary(db, [profile.id]),
     }
 
 
@@ -545,4 +559,8 @@ def for_developer(db: Session, person: User, batch: Optional[Batch]) -> dict:
     return {"batch": _brief(batch), "batches": cycle_list(db),
             "profiles": rows, "totals": totals,
             "activity": series, "streak": streak(series),
+            # The take-homes sitting on this developer's weekend. Same reason
+            # the diary is here and not behind the dashboard switch: it is not
+            # a measurement of them, it is work they have been given.
+            "assessments": assessments.summary(db, [p.id for p in profiles]),
             **interviews.for_developer(db, person, profiles)}

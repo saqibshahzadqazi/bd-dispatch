@@ -4,7 +4,7 @@ import Assessments from "./Assessments.jsx";
 import EntryTable from "./EntryTable.jsx";
 import Interviews from "./Interviews.jsx";
 import JobRecord from "./JobRecord.jsx";
-import { Availability, CopyButton, Skills } from "./widgets.jsx";
+import { Availability, CopyButton, Empty, Segment, Skills } from "./widgets.jsx";
 
 const FIELD_LABELS = {
   url: "Job link",
@@ -12,9 +12,15 @@ const FIELD_LABELS = {
   company: "Client or company",
   platform: "Platform",
   date: "Applied on",
+  // Where the posting is written out, when that is not the apply link. The
+  // server guesses this from the column headings and is usually right, but a
+  // sheet calling it something unexpected has to be correctable here — a
+  // column that can only ever be guessed is a column that is sometimes wrong
+  // with no way to fix it.
+  description_url: "Job description link",
 };
 
-export default function BdHome() {
+export default function BdHome({ pane = null, onPaneSeen }) {
   const [batches, setBatches] = useState([]);
   const [batchId, setBatchId] = useState(null);
   const [profiles, setProfiles] = useState([]);
@@ -29,6 +35,10 @@ export default function BdHome() {
   const [diary, setDiary] = useState(null);   // interview counts, for the badge
   const [tests, setTests] = useState(null);   // assessment counts, for the badge
   const [how, setHow] = useState("type");      // type | upload
+  // Narrows the new-jobs list. Client-side on purpose: the whole list is
+  // already here, so filtering it is instant and a request per keystroke would
+  // be slower and worse.
+  const [filter, setFilter] = useState("");
   const fileInput = useRef(null);
 
   const batch = useMemo(
@@ -57,6 +67,14 @@ export default function BdHome() {
   useEffect(() => {
     if (batch) setTab(batch.status === "computed" ? "new" : "applied");
   }, [batch?.id, batch?.status]);
+
+  // The command palette can land straight on a sub-tab. Honoured after the
+  // rule above so a deliberate jump is not overwritten by the default.
+  useEffect(() => {
+    if (!pane) return;
+    setTab(pane);
+    onPaneSeen?.();
+  }, [pane, onPaneSeen]);
 
   useEffect(() => {
     if (!batchId) return;
@@ -152,14 +170,25 @@ export default function BdHome() {
   const done = sheet.filter((j) => j.status === "applied").length;
   const handedIn = upload?.row_count || 0;
 
+  // What the filter box matches. `found_by` is in here because it is the whole
+  // reason the tag exists: a BD who has learned that a colleague's searches
+  // land well for this profile — or badly — wants that run of jobs together,
+  // and a tag you can read but not filter on cannot answer that.
+  const needle = filter.trim().toLowerCase();
+  const visible = needle
+    ? sheet.filter((job) => [job.title, job.company, job.platform, job.url,
+                             (job.found_by || []).join(" ")]
+        .some((field) => (field || "").toLowerCase().includes(needle)))
+    : sheet;
+
   if (!profiles.length) {
     return (
       <div className="stack">
         <h1>Your work</h1>
-        <div className="notice">
-          No profile has been assigned to you yet. Your manager creates one under
-          <b> People and profiles</b> — it is the name and resume your applications go out under.
-        </div>
+        <Empty title="No profile yet">
+          A profile is the name and resume your applications go out under. Your manager
+          creates one under <b>People and profiles</b>.
+        </Empty>
       </div>
     );
   }
@@ -198,9 +227,8 @@ export default function BdHome() {
               </button>
             ))}
           </div>
-          <p className="muted" style={{ marginTop: 9 }}>
-            Each profile keeps its own history. What {profile?.name} has applied to has no
-            bearing on what your other profiles are offered.
+          <p className="hint" style={{ marginTop: 8 }}>
+            Each profile keeps its own history.
           </p>
         </div>
       )}
@@ -212,15 +240,12 @@ export default function BdHome() {
           <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
             <div>
               <h3>Who you are applying as</h3>
-              <p className="muted" style={{ marginTop: 3, maxWidth: 680 }}>
+              <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
                 {profile.developer
-                  ? <>Behind <b>{profile.name}</b> is <b>{profile.developer}</b>. You hold this
-                      profile's whole record — what it applied to, what came back, and where each
-                      of those stands — so when a client replies, booking the interview is yours.
-                      It lands on {profile.developer}&apos;s screen, and what they say afterwards
-                      comes back here.</>
-                  : <>Nobody is attached to <b>{profile.name}</b> yet, so an interview booked
-                      against it reaches no one. Ask your manager to say who is behind it.</>}
+                  ? <>Behind <b>{profile.name}</b> is <b>{profile.developer}</b>. Booking
+                      a reply is yours; their debrief comes back here.</>
+                  : <>Nobody is attached to <b>{profile.name}</b>, so an interview booked
+                      against it reaches no one.</>}
               </p>
             </div>
             {profile.developer && <Availability value={profile.availability} />}
@@ -264,8 +289,8 @@ export default function BdHome() {
 
           {profile.availability === "booked" && (
             <div className="notice">
-              <b>{profile.developer || profile.name} is booked up.</b> Applying under this
-              profile now wins interviews nobody can sit. Worth checking before you send more.
+              <b>{profile.developer || profile.name} is booked up.</b> Worth checking before
+              you send more.
             </div>
           )}
         </section>
@@ -273,37 +298,39 @@ export default function BdHome() {
 
       {diary?.awaiting_time > 0 && (
         <div className="notice gate">
-          <b>{diary.awaiting_time} {diary.awaiting_time === 1 ? "reply is" : "replies are"} waiting
+          <b>{diary.awaiting_time} {diary.awaiting_time === 1 ? "reply" : "replies"} waiting
           on a time.</b>{" "}
-          Started from the record and not yet booked, so nobody has anything to turn up to.{" "}
-          <button className="link" onClick={() => setTab("interviews")}>Give them a time</button>
+          <button className="link" onClick={() => setTab("interviews")}>Give them one</button>
         </div>
       )}
 
       {tests?.overdue > 0 && (
         <div className="notice">
-          <b>{tests.overdue} assessment{tests.overdue === 1 ? " is" : "s are"} past the
-          deadline.</b>{" "}
-          A missed take-home costs the interview that earned it.{" "}
+          <b>{tests.overdue} take-home{tests.overdue === 1 ? "" : "s"} past the deadline.</b>{" "}
           <button className="link" onClick={() => setTab("assessments")}>Open them</button>
         </div>
       )}
 
       {diary?.today > 0 && (
         <div className="notice gate">
-          <b>{diary.today} interview{diary.today === 1 ? "" : "s"} today</b> against the profiles
-          you run.{" "}
+          <b>{diary.today} interview{diary.today === 1 ? "" : "s"} today.</b>{" "}
           <button className="link" onClick={() => setTab("interviews")}>Open the diary</button>
+        </div>
+      )}
+
+      {diary?.stalled > 0 && (
+        <div className="notice">
+          <b>{diary.stalled} conversation{diary.stalled === 1 ? "" : "s"} cleared a round, then
+          stopped.</b>{" "}
+          <button className="link" onClick={() => setTab("interviews")}>Pick them up</button>
         </div>
       )}
 
       {diary?.awaiting_outcome > 0 && (
         <div className="notice">
           <b>{diary.awaiting_outcome} interview
-          {diary.awaiting_outcome === 1 ? " has" : "s have"} happened with no outcome recorded.</b>{" "}
-          The developer was the one in the room, so it is usually theirs to answer — but nothing
-          here can tell you whether the applications are working until somebody does, and you can
-          record it yourself if they told you over the phone.{" "}
+          {diary.awaiting_outcome === 1 ? "" : "s"} with no outcome.</b>{" "}
+          Every rate reads low until somebody says.{" "}
           <button className="link" onClick={() => setTab("interviews")}>Open the diary</button>
         </div>
       )}
@@ -313,27 +340,22 @@ export default function BdHome() {
 
       {batch && (
         <>
-          {/* The two things a BD ever does here: report what they worked, and
-              pick up what is next. */}
-          <div className="row" style={{ gap: 8 }}>
-            <button className={tab === "applied" ? "" : "ghost"} onClick={() => setTab("applied")}>
-              Jobs I applied to{handedIn ? ` (${handedIn})` : ""}
-            </button>
-            <button className={tab === "new" ? "" : "ghost"} onClick={() => setTab("new")}>
-              New jobs for {profile?.name}{sheet.length ? ` (${sheet.length})` : ""}
-            </button>
-            <button className={tab === "record" ? "" : "ghost"} onClick={() => setTab("record")}>
-              All jobs
-            </button>
-            <button className={tab === "interviews" ? "" : "ghost"} onClick={() => setTab("interviews")}>
-              Interviews{diary?.awaiting_time ? ` (${diary.awaiting_time} waiting)`
-                : diary?.today ? ` (${diary.today} today)`
-                  : diary?.scheduled ? ` (${diary.scheduled})` : ""}
-            </button>
-            <button className={tab === "assessments" ? "" : "ghost"} onClick={() => setTab("assessments")}>
-              Assessments{tests?.open ? ` (${tests.open})` : ""}
-            </button>
-          </div>
+          <Segment
+            label="What you are working on"
+            value={tab}
+            onChange={setTab}
+            items={[
+              { key: "applied", label: "Applied", count: handedIn },
+              { key: "new", label: "New jobs", count: sheet.length },
+              { key: "record", label: "All jobs" },
+              { key: "interviews", label: "Interviews",
+                count: diary?.awaiting_time || diary?.today || diary?.scheduled,
+                tone: diary?.awaiting_time ? "bad" : undefined },
+              { key: "assessments", label: "Assessments",
+                count: tests?.open,
+                tone: tests?.overdue ? "bad" : undefined },
+            ]}
+          />
 
           {tab === "record" && (
             <JobRecord profiles={profiles} onOpenInterviews={() => setTab("interviews")} />
@@ -343,9 +365,7 @@ export default function BdHome() {
             <Assessments
               profiles={profiles}
               heading="Assessments"
-              intro="Take-homes and tests, across every profile you run. You set them because the
-                     client sent them to you; the developer does them and says how it went. Both
-                     of you can see everything on this screen."
+              intro="Take-homes across every profile you run. You set them, the developer does them."
             />
           )}
 
@@ -353,11 +373,7 @@ export default function BdHome() {
             <Interviews
               profiles={profiles}
               heading="Interviews"
-              intro="Every reply that turned into a conversation, across every profile you run.
-                     When a client answers, booking it is yours — you run the account they
-                     replied to. Logging one puts it on the developer's screen; nothing is
-                     emailed and nobody has to be told. What they say about the call afterwards
-                     comes back onto this same row, under notes."
+              intro="Every reply that became a conversation. Booking is yours; the debrief comes back here."
               showFunnel
             />
           )}
@@ -366,8 +382,8 @@ export default function BdHome() {
             <section className="stack" style={{ gap: 10 }}>
               <div>
                 <h2>Jobs {profile?.name} applied to</h2>
-                <p className="muted" style={{ marginTop: 3 }}>
-                  Hand these in so nobody is sent something this profile has already used.
+                <p className="hint" style={{ marginTop: 3 }}>
+                  Hand these in so nobody is sent what this profile already used.
                 </p>
               </div>
 
@@ -428,10 +444,8 @@ export default function BdHome() {
                     <div className="card pad stack" style={{ gap: 12 }}>
                       <div>
                         <h3>Columns we found</h3>
-                        <p className="muted" style={{ marginTop: 3 }}>
-                          The job link matters most — it is how the same posting is recognised
-                          across everyone's sheets. If the sheet has no links, make sure the
-                          title and client are both set.
+                        <p className="hint" style={{ marginTop: 3 }}>
+                          The job link matters most. No links? Set the title and client.
                         </p>
                       </div>
                       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))" }}>
@@ -499,6 +513,32 @@ export default function BdHome() {
                 </div>
               ) : (
                 <>
+                  <div className="card pad row" style={{ gap: 12, flexWrap: "wrap" }}>
+                    <div style={{ flex: "1 1 320px" }}>
+                      <label htmlFor="new-filter">Narrow this list</label>
+                      <input id="new-filter" style={{ width: "100%", marginTop: 4 }}
+                             value={filter}
+                             placeholder="A client, a job title, a platform, or who found it"
+                             onChange={(e) => setFilter(e.target.value)} />
+                    </div>
+                    <div className="row" style={{ alignItems: "flex-end", gap: 8 }}>
+                      <span className="muted">
+                        {needle
+                          ? `${visible.length} of ${sheet.length} shown`
+                          : `${sheet.length} on the list`}
+                      </span>
+                      {needle && (
+                        <button className="link" onClick={() => setFilter("")}>clear</button>
+                      )}
+                    </div>
+                  </div>
+
+                  {needle && visible.length === 0 ? (
+                    <div className="card pad muted">
+                      Nothing on this list matches “{filter}”. The names under <b>Found by</b> are
+                      profiles, not people — try the profile name a colleague applies under.
+                    </div>
+                  ) : (
                   <div className="card scroll">
                     <table>
                       <thead>
@@ -508,16 +548,30 @@ export default function BdHome() {
                         </tr>
                       </thead>
                       <tbody>
-                        {sheet.map((job) => (
+                        {visible.map((job) => (
                           <tr key={job.id}>
                             <td className="truncate">{job.title || "—"}</td>
                             <td>{job.company || "—"}</td>
                             <td>
+                              {/* Each name filters the list to that sourcer.
+                                  Reading "found by Faizan" on one row is
+                                  useful; seeing the whole run of them together
+                                  is what tells you whether their searches suit
+                                  this profile. */}
                               {job.found_by?.length ? (
-                                <span className="pill" title={
-                                  `Already applied to by ${job.found_by.join(", ")}. `
-                                  + "That is why it is on this list."}>
-                                  {job.found_by.join(", ")}
+                                <span className="row" style={{ gap: 4 }}>
+                                  {job.found_by.map((name) => (
+                                    <button key={name} className="pill"
+                                            style={{ cursor: "pointer", border: 0 }}
+                                            onClick={() => setFilter(
+                                              filter.trim().toLowerCase() === name.toLowerCase()
+                                                ? "" : name)}
+                                            title={`Already applied to by ${name}. That is why `
+                                              + "it is on this list. Click to see everything "
+                                              + "they found."}>
+                                      {name}
+                                    </button>
+                                  ))}
                                 </span>
                               ) : <span className="muted">—</span>}
                             </td>
@@ -553,16 +607,10 @@ export default function BdHome() {
                       </tbody>
                     </table>
                   </div>
-                  <p className="muted">
-                    Anything left as <b>to do</b> comes back next cycle. Marking a job
-                    <b> applied</b> or <b> skipped</b> retires it from this profile for good, and
-                    a skipped one leaves this list the moment you set it — it is never offered to
-                    {" "}{profile?.name} again.
-                    {batch.status === "open" && batch.auto_build_minutes > 0 && (
-                      <> This list refreshes every {batch.auto_build_minutes} minutes as
-                      colleagues log their work, so jobs may drop off — anything you have already
-                      marked stays put.</>
-                    )}
+                  )}
+                  <p className="hint">
+                    <b>To do</b> comes back next cycle. <b>Applied</b> or <b>skipped</b>
+                    {" "}retires it from {profile?.name} for good.
                   </p>
                 </>
               )}

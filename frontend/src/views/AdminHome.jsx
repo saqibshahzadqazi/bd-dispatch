@@ -229,10 +229,9 @@ export default function AdminHome() {
           ))}
         </div>
 
-        <p className="muted" style={{ marginTop: 9 }}>
-          The client rule stops one profile bidding on four jobs from the same buyer, which reads
-          as spam on their end. Leave it off unless you have plenty of distinct clients.
-        </p>
+        <p className="hint">
+              Stops one profile bidding on four jobs from the same buyer.
+            </p>
       </section>
 
       {detail && (
@@ -326,11 +325,9 @@ export default function AdminHome() {
           {report.matrix?.names?.length > 1 && (
             <div>
               <h3>Which profiles are stepping on each other</h3>
-              <p className="muted" style={{ margin: "3px 0 9px" }}>
-                Each cell counts jobs both profiles applied to. A dark cell means those two are
-                running near-identical searches — fix that at the source and the duplicates drop
-                before this tool ever runs.
-              </p>
+              <p className="hint" style={{ marginTop: 3 }}>
+            Jobs both profiles applied to. Dark means near-identical searches.
+          </p>
               <Matrix names={report.matrix.names} rows={report.matrix.rows} />
             </div>
           )}

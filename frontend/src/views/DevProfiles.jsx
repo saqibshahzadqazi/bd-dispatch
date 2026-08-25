@@ -103,10 +103,9 @@ export default function DevProfiles() {
     <div className="stack">
       <div>
         <h1>Your details</h1>
-        <p className="muted" style={{ marginTop: 3, maxWidth: 760 }}>
-          One card per identity your team applies under. What is here is what a client is
-          handed, so it is yours to keep right — the name on the profile and who runs it are
-          your manager&apos;s.
+        <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
+          One card per identity you are sold under. This is what a client is
+          handed, so it is yours to keep right.
         </p>
       </div>
 
@@ -144,10 +143,9 @@ export default function DevProfiles() {
                   )
                 )}
               </div>
-              <p className="muted" style={{ marginTop: 6 }}>
-                Saved the moment you press it, because your team acts on it the same hour.
-                Nothing else on this card is saved until you say so.
-              </p>
+              <p className="hint">
+            Saved on press. Everything else waits for <b>Save</b>.
+          </p>
             </div>
 
             <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))" }}>
@@ -211,9 +209,8 @@ export default function DevProfiles() {
 
             {!profile.resume_url && (
               <div className="notice">
-                No resume link. Your BD is applying under your name with nothing to attach —
-                this is the single most useful field on the card.
-              </div>
+                  <b>No resume link.</b> Your BD is applying with nothing to attach.
+                </div>
             )}
           </section>
         );

@@ -1,7 +1,7 @@
 import React from "react";
 import {
-  CyclePicker, Funnel, InterviewRows, NextInterview, ProfileCard, Sparkline,
-  TeamBoard, Tiles, sinceText,
+  AssessmentBoard, CyclePicker, Funnel, InterviewRows, NextInterview,
+  ProfileCard, Sparkline, Stalled, TeamBoard, Tiles, sinceText,
 } from "./widgets.jsx";
 
 /** One person's progress.
@@ -26,6 +26,7 @@ export default function PersonDashboard({
   // there is one it goes above the headline rather than below it.
   const diary = data.interviews;
   const next = diary?.today.find((row) => !row.is_past && row.status === "scheduled") || null;
+  const tests = data.assessments;
 
   // Every label that names an owner, in one place. `whose` reads as "your" or
   // "Ali's"; `did` as "you logged" or "Ali logged".
@@ -105,16 +106,24 @@ export default function PersonDashboard({
           tone: diary.counts.today ? "petrol" : undefined,
           foot: diary.counts.week ? `${diary.counts.week} in seven days` : undefined,
           hint: "Against the profiles these figures cover. Eastern time." },
+        // Only shown once there is one. A tile reading zero take-homes on a
+        // team that has never been sent one is a column of noise.
+        tests?.counts.total ? {
+          label: "take-homes outstanding", value: tests.counts.open,
+          tone: tests.counts.overdue ? "brick" : undefined,
+          foot: tests.counts.overdue
+            ? `${tests.counts.overdue} past the deadline` : undefined,
+          hint: "A test a client sent. The only work here with a deadline, and the only kind "
+                + "that is lost by nobody doing anything.",
+        } : null,
       ]} />
 
       {diary && (diary.counts.total > 0 || data.funnel.applications > 0) && (
         <section className="stack" style={{ gap: 10 }}>
           <div>
             <h2>What {whose} applications turned into</h2>
-            <p className="muted" style={{ marginTop: 3, maxWidth: 760 }}>
-              Every other figure on this screen counts effort, and all of them go up when
-              somebody types faster. These do not. They only move when the work was worth
-              sending.
+            <p className="hint" style={{ marginTop: 3, maxWidth: 640 }}>
+              These only move when the work was worth sending.
             </p>
           </div>
           <Funnel data={data.funnel} awaiting={diary.counts.awaiting_outcome} />
@@ -138,39 +147,53 @@ export default function PersonDashboard({
           {diary.counts.awaiting_outcome > 0 && (
             <div className="notice">
               <b>{diary.counts.awaiting_outcome} interview
-              {diary.counts.awaiting_outcome === 1 ? " has" : "s have"} been and gone with no
-              outcome recorded.</b> {onOpenWork
-                ? "Record them under My work → Interviews."
-                : `${viewingAs} can record them under My work → Interviews.`} Until somebody
-              does, the rates above read lower than the truth.
+              {diary.counts.awaiting_outcome === 1 ? "" : "s"} with no outcome.</b>{" "}
+              {onOpenWork ? "Record them under My work → Interviews."
+                : `${viewingAs} can record them under My work → Interviews.`}
             </div>
+          )}
+
+          {/* Read-only here. Booking the next round is done where the diary
+              is, so this points at it rather than growing a second button
+              that does the same thing from a screen about figures. */}
+          <Stalled rows={diary.stalled} />
+          {diary.stalled?.length > 0 && (
+            <p className="muted">
+              {onOpenWork
+                ? "Book the next round under My work → Interviews."
+                : `${viewingAs} can book the next round under My work → Interviews.`}
+            </p>
           )}
         </section>
       )}
 
+      <AssessmentBoard
+        data={tests}
+        onOpen={onOpenWork}
+        heading={`Take-homes against ${whose} profiles`}
+        note="A missed deadline changes nothing on screen until the client writes again."
+      />
+
       <section>
         <h3>What {viewingAs || "you"} logged, day by day</h3>
-        <p className="muted" style={{ margin: "3px 0 9px" }}>
-          Every job recorded against {whose} profiles over the last fortnight, in Eastern time.
+        <p className="hint" style={{ margin: "3px 0 9px" }}>
+          The last fortnight, Eastern time.
         </p>
         <div className="card pad"><Sparkline series={data.activity} /></div>
       </section>
 
       {totals.duplicates > 0 && (
         <div className="notice">
-          <b>{totals.duplicates} of the {totals.logged} jobs {did("logged")} this cycle</b> were
-          already on a colleague's sheet. That is not a mistake — it means this search and theirs
-          are covering the same ground. Different filters, boards or specialisms would widen the
-          pool before this tool ever runs.
+          <b>{totals.duplicates} of {totals.logged} jobs {did("logged")}</b> were already on a
+          colleague's sheet — the two searches are covering the same ground.
         </div>
       )}
 
       <section className="stack" style={{ gap: 10 }}>
         <div>
           <h2>{viewingAs ? `Profiles ${viewingAs} runs` : "Your profiles"}</h2>
-          <p className="muted" style={{ marginTop: 3 }}>
-            Each keeps its own history. What one has applied to has no bearing on what the
-            others are offered.
+          <p className="hint" style={{ marginTop: 3 }}>
+            Each keeps its own history.
           </p>
         </div>
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))" }}>
@@ -207,9 +230,8 @@ export default function PersonDashboard({
           </div>
 
           {!data.team_visible ? (
-            <div className="notice">
-              The team board is off. Your own numbers above are always yours to see; comparing
-              them with everyone else's is something your manager turns on.
+            <div className="notice gate">
+              The team board is off. Your own figures are always yours to see.
             </div>
           ) : showBoard && board ? (
             <>

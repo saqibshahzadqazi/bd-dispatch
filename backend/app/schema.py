@@ -26,6 +26,11 @@ columns go on below. Additive again, so upgrading is a restart. Every interview
 already recorded lands on `screening`, which is what most first conversations
 were, and can be moved.
 
+Version 2.5 linked an interview to the round it followed on from, so a client
+who ran four rounds reads as one story rather than four unrelated rows. One
+nullable column on `interviews`; every interview already recorded has no
+predecessor, which is exactly what an empty column says.
+
 Everything below is idempotent. A brand new database skips it entirely.
 """
 from __future__ import annotations
@@ -76,11 +81,16 @@ LATER_COLUMNS = {
     # existing row: an interview logged before stages existed was somebody's
     # first conversation with that client far more often than not, and a
     # default that is usually right beats a blank on every historical row.
+    #
+    # v2.5 — the round this one followed on from. NULL on every existing row,
+    # which is the truth: nothing recorded before the column existed was booked
+    # out of anything.
     "interviews": [
         ("debrief", "TEXT DEFAULT ''"),
         ("reported_by", "INTEGER"),
         ("reported_at", "TIMESTAMP"),
         ("stage", "VARCHAR(16) DEFAULT 'screening'"),
+        ("previous_id", "INTEGER"),
     ],
     # v2.4 — where the posting is written out, when that is not the apply link.
     # Empty on every job already recorded, which is the truth: nobody was asked

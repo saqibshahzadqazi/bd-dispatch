@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import PersonDashboard from "./PersonDashboard.jsx";
+import { Loading } from "./widgets.jsx";
 
 /** A BD's own dashboard.
  *
@@ -59,7 +60,7 @@ export default function Dashboard({ onOpenWork }) {
   }
 
   if (error && !data) return <div className="notice">{error}</div>;
-  if (!data) return <p className="muted">Loading your dashboard…</p>;
+  if (!data) return <Loading lines={4} figures />;
 
   return (
     <PersonDashboard
