@@ -81,6 +81,190 @@ export function Segment({ items, value, onChange, label = "View" }) {
   );
 }
 
+export function DateRange({ dateFrom, dateTo, onChange }) {
+  const update = (key, value) => onChange({ dateFrom: key === "dateFrom" ? value : dateFrom,
+                                             dateTo: key === "dateTo" ? value : dateTo });
+  return (
+    <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+      <label className="row muted" style={{ gap: 5 }}>
+        From
+        <input type="date" value={dateFrom} onChange={(e) => update("dateFrom", e.target.value)} />
+      </label>
+      <label className="row muted" style={{ gap: 5 }}>
+        To
+        <input type="date" value={dateTo} onChange={(e) => update("dateTo", e.target.value)} />
+      </label>
+      {(dateFrom || dateTo) && (
+        <button className="link" onClick={() => onChange({ dateFrom: "", dateTo: "" })}>
+          Clear dates
+        </button>
+      )}
+    </div>
+  );
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "1 Aug" from "2026-08-01", without constructing a Date.
+ *
+ * These strings are already the team's working day, decided on the server.
+ * Handing one to `new Date()` would parse it as UTC midnight and print the
+ * day before for anybody west of Greenwich — the one bug this whole app is
+ * careful about, reintroduced for a label. */
+function dayLabel(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${d} ${MONTHS[m - 1]}${y === new Date().getFullYear() ? "" : ` ${y}`}`;
+}
+
+/** What somebody did between two dates.
+ *
+ * The rest of this app answers "how is the current cycle going". This answers
+ * the question people are actually asked at the end of a fortnight: what did
+ * you do between these two dates. They are different questions — a cycle
+ * opened on the 3rd is still being worked on the 20th — so this is its own
+ * block rather than the usual figures with a filter on them.
+ *
+ * `show` is "all" for a BD, whose week is applications first, and "interviews"
+ * for a developer, who did not send any.
+ */
+export function RangeReport({ report, show = "all", whose = "your" }) {
+  if (!report) return null;
+  const { applied, heard_back: heard, interviews: sat } = report;
+  const span = [dayLabel(report.from), dayLabel(report.to)].filter(Boolean).join(" – ");
+  const sendings = show === "all";
+
+  return (
+    <section className="card pad stack enter" style={{ gap: 16 }}>
+      <div className="head">
+        <h2>{span || "This range"}</h2>
+        <span className="hint">
+          {report.days} day{report.days === 1 ? "" : "s"} · everything below is
+          {" "}this range only
+        </span>
+      </div>
+
+      {sendings && (
+        <div className="stack" style={{ gap: 10 }}>
+          <Tiles items={[
+            { label: "applications sent", value: applied.total },
+            { label: "a day, on average", value: applied.per_day,
+              foot: `${applied.active_days} day${applied.active_days === 1 ? "" : "s"} worked` },
+            { label: `${whose === "your" ? "you" : whose} found`, value: applied.own_found,
+              hint: "Postings off this profile's own sheet." },
+            { label: "found by colleagues", value: applied.from_others,
+              hint: "Postings the cycle handed over, then marked applied." },
+            { label: "skipped", value: applied.skipped },
+            applied.busiest ? {
+              label: "busiest day", value: applied.busiest.count,
+              foot: dayLabel(applied.busiest.day),
+            } : null,
+          ]} />
+
+          {/* The split as one bar. Two numbers side by side are two numbers;
+              a bar is the ratio, which is the thing being asked about. */}
+          {applied.total > 0 && (
+            <div>
+              <div className="bar" title={`${applied.own_found} found here · `
+                + `${applied.from_others} from colleagues`}>
+                <i style={{ width: `${(applied.own_found / applied.total) * 100}%`,
+                            background: "var(--a)" }} />
+                <i style={{ width: `${(applied.from_others / applied.total) * 100}%`,
+                            background: "var(--ok)" }} />
+              </div>
+              <p className="hint" style={{ marginTop: 5 }}>
+                {Math.round((applied.own_found / applied.total) * 100)}% off
+                {" "}{whose === "your" ? "your" : `${whose}'s`} own search,
+                {" "}{100 - Math.round((applied.own_found / applied.total) * 100)}% off
+                {" "}colleagues&apos;.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── What came back ─────────────────────────────────────────────── */}
+      <div className="stack" style={{ gap: 10 }}>
+        <div className="head">
+          <h3>What came back</h3>
+          <span className="hint">
+            {sat.conversations} client{sat.conversations === 1 ? "" : "s"} talked,
+            {" "}across {sat.sittings} interview{sat.sittings === 1 ? "" : "s"}
+            {sendings && applied.total > 0 ? ` · ${heard.rate}% of what went out` : ""}
+          </span>
+        </div>
+
+        {sat.sittings === 0 ? (
+          <Empty>No interviews in this range.</Empty>
+        ) : (
+          <>
+            <Tiles items={[
+              { label: "interviews held", value: sat.completed,
+                hint: "Been and gone, whatever the outcome." },
+              { label: "still to come", value: sat.scheduled },
+              { label: "one round only", value: sat.one_round,
+                hint: "Clients who spoke once and went no further." },
+              { label: "reached a 2nd round", value: sat.two_plus,
+                tone: sat.two_plus ? "ok" : undefined },
+              { label: "reached a 3rd", value: sat.three_plus,
+                tone: sat.three_plus ? "ok" : undefined },
+              { label: "furthest one got", value: sat.furthest
+                ? `${sat.furthest} round${sat.furthest === 1 ? "" : "s"}` : "—" },
+              sat.offers ? { label: "offers", value: sat.offers, tone: "ok" } : null,
+              sat.rejected ? { label: "ended in a no", value: sat.rejected } : null,
+            ]} />
+
+            <StageLadder rows={sat.by_stage} />
+
+            {heard.clients.length > 0 && (
+              <div className="card scroll">
+                <table className="board">
+                  <thead>
+                    <tr>
+                      <th>Client</th>
+                      <th>Role</th>
+                      <th>Got to</th>
+                      <th>How it ended</th>
+                      <th>Last spoke</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {heard.clients.map((row, i) => (
+                      <tr key={`${row.client}-${i}`}>
+                        <td><b>{row.client}</b></td>
+                        <td className="truncate" style={{ maxWidth: 240 }}>
+                          {row.role || <span className="muted">—</span>}
+                        </td>
+                        <td>
+                          {STAGE_LABELS[row.stage] || row.stage}
+                          {row.rounds > 1 && (
+                            <span className="hint"> · {row.rounds} rounds</span>
+                          )}
+                        </td>
+                        <td>
+                          <span className={row.outcome === "rejected" ? "pill off"
+                            : ["offer", "hired", "passed"].includes(row.outcome) ? "pill on"
+                              : "pill"}>
+                            {row.outcome === "pending" ? "not said yet" : row.outcome}
+                          </span>
+                        </td>
+                        <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                          {row.when.label}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 /** Nothing here — said in a way that reads as finished rather than broken.
  *
  * A blank panel is indistinguishable from a failed request. A sentence and,

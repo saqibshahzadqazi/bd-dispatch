@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, safeUrl } from "../api.js";
 import {
-  AssessmentBoard, Availability, CyclePicker, DeveloperBoard, Funnel,
-  InterviewRows, Loading, Progress, Skills, Sparkline, StageLadder, Stalled,
-  TeamBoard, Tiles, sinceText,
+  AssessmentBoard, Availability, CyclePicker, DateRange, DeveloperBoard, Funnel,
+  InterviewRows, Loading, Progress, RangeReport, Skills, Sparkline, StageLadder,
+  Stalled, TeamBoard, Tiles, sinceText,
 } from "./widgets.jsx";
 import PersonDashboard from "./PersonDashboard.jsx";
 
@@ -14,14 +14,14 @@ import PersonDashboard from "./PersonDashboard.jsx";
  * on. Outcomes are editable from here on purpose — the person chasing them is
  * usually the one on this screen.
  */
-function DeveloperView({ person, batchId, onClose }) {
+function DeveloperView({ person, batchId, dateRange, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
   const load = useCallback(() => {
-    api.developerDashboard(person.user_id, batchId)
+    api.developerDashboard(person.user_id, batchId, dateRange.dateFrom, dateRange.dateTo)
       .then(setData).catch((err) => setError(err.message));
-  }, [person.user_id, batchId]);
+  }, [person.user_id, batchId, dateRange]);
 
   useEffect(() => { setData(null); load(); }, [load]);
 
@@ -72,6 +72,8 @@ function DeveloperView({ person, batchId, onClose }) {
 
       <Funnel data={funnel} awaiting={counts.awaiting_outcome} />
       <StageLadder rows={funnel?.by_stage} />
+
+      <RangeReport report={data.report} show="interviews" />
 
       <Stalled rows={data.stalled} onNextRound={advance} />
 
@@ -139,14 +141,15 @@ function DeveloperView({ person, batchId, onClose }) {
 }
 
 /** One profile, close up. Opened by clicking a row on either table. */
-function ProfileDetail({ profileId, batchId, onClose }) {
+function ProfileDetail({ profileId, batchId, dateRange, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     setData(null);
-    api.profileDetail(profileId, batchId).then(setData).catch((err) => setError(err.message));
-  }, [profileId, batchId]);
+    api.profileDetail(profileId, batchId, dateRange.dateFrom, dateRange.dateTo)
+      .then(setData).catch((err) => setError(err.message));
+  }, [profileId, batchId, dateRange]);
 
   if (error) return <div className="notice">{error}</div>;
   if (!data) return <Loading lines={4} />;
@@ -176,6 +179,8 @@ function ProfileDetail({ profileId, batchId, onClose }) {
         { label: "still to do", value: stats.pending },
         { label: "applications all time", value: stats.all_time },
       ]} />
+
+      <RangeReport report={data.report} whose={profile.name} />
 
       <AssessmentBoard
         data={data.assessments}
@@ -256,15 +261,15 @@ function ProfileDetail({ profileId, batchId, onClose }) {
  * switch that decides whether they get it sitting on top of it. Checking what
  * you are about to show somebody and showing it are then the same act.
  */
-function PersonView({ person, batchId, onBatchChange, onClose, onToggle, busy }) {
+function PersonView({ person, batchId, dateRange, onBatchChange, onClose, onToggle, busy }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     setData(null);
-    api.personDashboard(person.user_id, batchId)
+    api.personDashboard(person.user_id, batchId, dateRange.dateFrom, dateRange.dateTo)
       .then(setData).catch((err) => setError(err.message));
-  }, [person.user_id, batchId]);
+  }, [person.user_id, batchId, dateRange]);
 
   const open = person.dashboard_visible;
 
@@ -339,6 +344,7 @@ function History({ rows }) {
 export default function ManagerDashboard({ onOpenBatches }) {
   const [data, setData] = useState(null);
   const [batchId, setBatchId] = useState(null);
+  const [dateRange, setDateRange] = useState({ dateFrom: "", dateTo: "" });
   const [openProfile, setOpenProfile] = useState(null);
   const [openPerson, setOpenPerson] = useState(null);
   const [openDev, setOpenDev] = useState(null);
@@ -348,13 +354,13 @@ export default function ManagerDashboard({ onOpenBatches }) {
 
   const load = useCallback(async (id) => {
     try {
-      const next = await api.overview(id);
+      const next = await api.overview(id, dateRange.dateFrom, dateRange.dateTo);
       setData(next);
       if (!id && next.batch) setBatchId(next.batch.id);
     } catch (err) {
       setNote({ bad: true, text: err.message });
     }
-  }, []);
+  }, [dateRange]);
 
   useEffect(() => { load(batchId); }, [batchId, load]);
 
@@ -432,6 +438,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
             setBatchId(id);
             setOpenProfile(null);
           }} />
+          <DateRange {...dateRange} onChange={setDateRange} />
           {onOpenBatches && <button className="ghost" onClick={onOpenBatches}>Run the cycle</button>}
         </div>
       </div>
@@ -442,13 +449,15 @@ export default function ManagerDashboard({ onOpenBatches }) {
         { label: "profiles handed in", value: `${org.handed_in}/${org.expected}`,
           tone: org.handed_in < 2 ? "brick" : undefined,
           hint: "Two sheets are the minimum before anything can be compared." },
-        { label: "distinct jobs logged", value: org.logged },
+        { label: "jobs found by their own profiles", value: org.own_found },
+        { label: "jobs found by colleagues", value: org.from_others },
         { label: "postings found twice", value: org.duplicates,
           tone: org.duplicates ? "brick" : undefined,
           foot: `${org.wasted_rows} rows typed twice · ${org.duplicate_pct}%`,
           hint: "Postings more than one profile logged. Counted once each, however many people found them." },
         { label: "places on lists", value: org.assigned },
         { label: "applied from those lists", value: org.applied, tone: "pine" },
+        { label: "skipped from those lists", value: org.skipped },
         { label: "of all lists worked through", value: `${org.done_pct}%` },
       ]} />
 
@@ -507,6 +516,9 @@ export default function ManagerDashboard({ onOpenBatches }) {
           </p>
         </div>
         <StageLadder rows={data.funnel?.by_stage} />
+        <p className="muted">Round progression: {data.funnel?.rounds?.initial || 0} initial,
+          {" "}{data.funnel?.rounds?.two_or_more || 0} reached round 2,
+          {" "}{data.funnel?.rounds?.three_or_more || 0} reached round 3+.</p>
         <Funnel data={data.funnel} awaiting={diary?.counts.awaiting_outcome || 0}
                 note="Applications are all-time across the workspace. Interviews are never
                       filtered to a cycle: a reply that lands three weeks late belongs to the
@@ -560,6 +572,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
 
       {openDev && (
         <DeveloperView person={openDev} batchId={batchId || batch?.id}
+                       dateRange={dateRange}
                        onClose={() => setOpenDev(null)} />
       )}
 
@@ -718,6 +731,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
         <PersonView
           person={people.find((p) => p.user_id === openPerson.user_id) || openPerson}
           batchId={batchId || batch?.id}
+          dateRange={dateRange}
           onBatchChange={setBatchId}
           onToggle={togglePerson}
           busy={saving}
@@ -726,6 +740,7 @@ export default function ManagerDashboard({ onOpenBatches }) {
 
       {openProfile && (
         <ProfileDetail profileId={openProfile} batchId={batchId || batch?.id}
+                       dateRange={dateRange}
                        onClose={() => setOpenProfile(null)} />
       )}
 

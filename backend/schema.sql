@@ -211,6 +211,7 @@ CREATE TABLE IF NOT EXISTS assignments (
     -- Mirrors the cycle's mode onto the row so the partial index below can
     -- hold the split-mode guarantee in the database.
     exclusive  BOOLEAN NOT NULL DEFAULT FALSE,
+    status_changed_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT (now() AT TIME ZONE 'utc'),
     CONSTRAINT uq_job_per_profile UNIQUE (batch_id, job_id, profile_id),
     CONSTRAINT ck_assignments_status

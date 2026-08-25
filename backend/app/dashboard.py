@@ -33,7 +33,8 @@ from sqlalchemy.orm import Session
 
 from . import assessments, interviews
 from .models import (Application, Assignment, Batch, BatchApplication, Job,
-                     Profile, Upload, User, to_working, working_today)
+                     Profile, Upload, User, to_working, working_label,
+                     working_today)
 
 ACTIVITY_DAYS = 14        # the strip on a BD's own dashboard
 ORG_ACTIVITY_DAYS = 30    # the manager sees further back
@@ -43,12 +44,24 @@ CYCLE_PICKER = 24
 
 # Summed the same way everywhere: a person's row is their profiles added up,
 # and the workspace row is every profile added up.
-ROLLUP_KEYS = ("sheet_rows", "logged", "duplicates", "assigned",
-               "applied", "skipped", "pending", "all_time")
+ROLLUP_KEYS = ("sheet_rows", "logged", "duplicates", "assigned", "own_found",
+               "from_others", "applied", "skipped", "pending", "all_time")
 
 
 def _pct(part: int, whole: int) -> int:
     return round(100 * part / whole) if whole else 0
+
+
+# SQLite caps the bound parameters in one statement, so every IN (…) built from
+# user data is fed through in slices. Kept local rather than imported from
+# main.py, which imports this module.
+_PARAM_CHUNK = 500
+
+
+def _chunks(items, size: int = _PARAM_CHUNK):
+    items = list(items)
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
 
 
 def _working_day(value: Optional[dt.datetime]) -> Optional[dt.date]:
@@ -66,7 +79,8 @@ def _today() -> dt.date:
 
 def blank_stats() -> dict:
     return {"sheet_rows": 0, "logged": 0, "duplicates": 0, "assigned": 0,
-            "applied": 0, "skipped": 0, "pending": 0, "done_pct": 0, "applied_pct": 0}
+            "own_found": 0, "from_others": 0, "applied": 0, "skipped": 0,
+            "pending": 0, "done_pct": 0, "applied_pct": 0}
 
 
 # --------------------------------------------------------------------------- #
@@ -74,14 +88,21 @@ def blank_stats() -> dict:
 # --------------------------------------------------------------------------- #
 
 def activity(db: Session, profile_ids: Optional[Sequence[int]] = None,
-             days: int = ACTIVITY_DAYS) -> list[dict]:
+             days: int = ACTIVITY_DAYS,
+             date_from: Optional[dt.date] = None,
+             date_to: Optional[dt.date] = None) -> list[dict]:
     """Jobs logged per working day, oldest first.
 
     Always exactly `days` long, zeros included, so the strip keeps its shape on
     a quiet week instead of collapsing to a couple of bars.
     """
     today = _today()
-    window = [today - dt.timedelta(days=n) for n in range(days - 1, -1, -1)]
+    start = date_from or today - dt.timedelta(days=days - 1)
+    end = date_to or today
+    if start > end:
+        return []
+    window = [start + dt.timedelta(days=n)
+              for n in range((end - start).days + 1)]
     if profile_ids is not None and not profile_ids:
         return [{"day": day.isoformat(), "count": 0} for day in window]
 
@@ -96,7 +117,9 @@ def activity(db: Session, profile_ids: Optional[Sequence[int]] = None,
     tally: Counter = Counter()
     for (stamp,) in db.execute(query).all():
         day = _working_day(stamp)
-        if day is not None:
+        if (day is not None and
+            (date_from is None or day >= date_from) and
+            (date_to is None or day <= date_to)):
             tally[day] += 1
     return [{"day": day.isoformat(), "count": tally.get(day, 0)} for day in window]
 
@@ -123,15 +146,24 @@ def streak(series: Sequence[dict]) -> int:
 # Per-profile figures
 # --------------------------------------------------------------------------- #
 
-def cycle_stats(db: Session, batch_id: Optional[int]) -> dict[int, dict]:
+def cycle_stats(db: Session, batch_id: Optional[int],
+                date_from: Optional[dt.date] = None,
+                date_to: Optional[dt.date] = None) -> dict[int, dict]:
     """Every profile's figures for one cycle, keyed by profile id."""
     stats: dict[int, dict] = defaultdict(blank_stats)
     if not batch_id:
         return dict(stats)
 
+    upload_query = select(Upload.profile_id, func.sum(Upload.row_count)).where(
+        Upload.batch_id == batch_id)
+    if date_from:
+        upload_query = upload_query.where(
+            Upload.created_at >= dt.datetime.combine(date_from, dt.time.min))
+    if date_to:
+        upload_query = upload_query.where(
+            Upload.created_at < dt.datetime.combine(date_to + dt.timedelta(days=1), dt.time.min))
     for profile_id, rows in db.execute(
-        select(Upload.profile_id, func.sum(Upload.row_count))
-        .where(Upload.batch_id == batch_id)
+        upload_query
         .group_by(Upload.profile_id)
     ).all():
         if profile_id is not None:
@@ -140,27 +172,62 @@ def cycle_stats(db: Session, batch_id: Optional[int]) -> dict[int, dict]:
     # A job two profiles both logged is the duplicated effort this whole product
     # exists to surface, so it is counted against each of them.
     by_job: dict[int, set[int]] = defaultdict(set)
+    batch_application_query = select(BatchApplication.job_id, BatchApplication.profile_id).where(
+        BatchApplication.batch_id == batch_id)
+    if date_from or date_to:
+        batch_application_query = batch_application_query.join(
+            Upload, (Upload.batch_id == BatchApplication.batch_id) &
+                    (Upload.profile_id == BatchApplication.profile_id))
+        if date_from:
+            batch_application_query = batch_application_query.where(
+                Upload.created_at >= dt.datetime.combine(date_from, dt.time.min))
+        if date_to:
+            batch_application_query = batch_application_query.where(
+                Upload.created_at < dt.datetime.combine(date_to + dt.timedelta(days=1), dt.time.min))
     for job_id, profile_id in db.execute(
-        select(BatchApplication.job_id, BatchApplication.profile_id)
-        .where(BatchApplication.batch_id == batch_id)
+        batch_application_query
     ).all():
         by_job[job_id].add(profile_id)
+
     for holders in by_job.values():
         shared = len(holders) > 1
         for profile_id in holders:
             stats[profile_id]["logged"] += 1
+            # The same number as `logged`, under the name of the question a BD
+            # actually asks at the end of a week: how much of what went out did
+            # I find myself. Kept as its own key so `own_found + from_others`
+            # reads as the whole of the week's work — which is the split the
+            # report is built on.
+            stats[profile_id]["own_found"] += 1
             if shared:
                 stats[profile_id]["duplicates"] += 1
 
+    # Work on the list is dated by when somebody marked it, not by when the
+    # cycle put it there. A job dispatched on Monday and applied for on Friday
+    # belongs to Friday — that is the day the work happened, and it is the day
+    # the person asking "what did I do this week" means.
+    changed_at = func.coalesce(Assignment.status_changed_at, Assignment.created_at)
+    assignment_query = select(Assignment.profile_id, Assignment.status,
+                              func.count(Assignment.id)).where(Assignment.batch_id == batch_id)
+    if date_from:
+        assignment_query = assignment_query.where(
+            changed_at >= dt.datetime.combine(date_from, dt.time.min))
+    if date_to:
+        assignment_query = assignment_query.where(
+            changed_at < dt.datetime.combine(date_to + dt.timedelta(days=1), dt.time.min))
     for profile_id, status, count in db.execute(
-        select(Assignment.profile_id, Assignment.status, func.count(Assignment.id))
-        .where(Assignment.batch_id == batch_id)
+        assignment_query
         .group_by(Assignment.profile_id, Assignment.status)
     ).all():
         row = stats[profile_id]
         row["assigned"] += count
         if status in ("applied", "skipped", "pending"):
             row[status] += count
+            # Anything on a dispatched list is by definition a job somebody
+            # else found — a profile is never handed a posting it logged
+            # itself. So the applied ones are the other half of the split.
+            if status == "applied":
+                row["from_others"] += count
 
     for row in stats.values():
         row["done_pct"] = _pct(row["applied"] + row["skipped"], row["assigned"])
@@ -168,25 +235,36 @@ def cycle_stats(db: Session, batch_id: Optional[int]) -> dict[int, dict]:
     return dict(stats)
 
 
-def all_time(db: Session) -> dict[int, int]:
+def all_time(db: Session, date_from: Optional[dt.date] = None,
+             date_to: Optional[dt.date] = None) -> dict[int, int]:
     """Applications each profile has ever recorded, across every cycle."""
+    query = select(Application.profile_id, func.count(Application.id))
+    if date_from:
+        query = query.where(Application.created_at >= dt.datetime.combine(date_from, dt.time.min))
+    if date_to:
+        query = query.where(Application.created_at < dt.datetime.combine(date_to + dt.timedelta(days=1), dt.time.min))
     return {profile_id: count for profile_id, count in db.execute(
-        select(Application.profile_id, func.count(Application.id))
-        .group_by(Application.profile_id)).all() if profile_id is not None}
+        query.group_by(Application.profile_id)).all() if profile_id is not None}
 
 
-def last_logged(db: Session) -> dict[int, dt.datetime]:
+def last_logged(db: Session, date_from: Optional[dt.date] = None,
+                date_to: Optional[dt.date] = None) -> dict[int, dt.datetime]:
+    query = select(Application.profile_id, func.max(Application.created_at))
+    if date_from:
+        query = query.where(Application.created_at >= dt.datetime.combine(date_from, dt.time.min))
+    if date_to:
+        query = query.where(Application.created_at < dt.datetime.combine(date_to + dt.timedelta(days=1), dt.time.min))
     return {profile_id: stamp for profile_id, stamp in db.execute(
-        select(Application.profile_id, func.max(Application.created_at))
-        .group_by(Application.profile_id)).all() if profile_id is not None}
+        query.group_by(Application.profile_id)).all() if profile_id is not None}
 
 
 def profile_rows(db: Session, profiles: Sequence[Profile], batch_id: Optional[int],
-                 owners: dict[int, str]) -> list[dict]:
+                 owners: dict[int, str], date_from: Optional[dt.date] = None,
+                 date_to: Optional[dt.date] = None) -> list[dict]:
     """One row per profile, busiest first."""
-    stats = cycle_stats(db, batch_id)
-    totals = all_time(db)
-    latest = last_logged(db)
+    stats = cycle_stats(db, batch_id, date_from, date_to)
+    totals = all_time(db, date_from, date_to)
+    latest = last_logged(db, date_from, date_to)
     # Take-homes outstanding against each identity. On the row rather than in a
     # separate block, because a board that shows how much a profile applied for
     # while saying nothing about the test it owes a client is showing the half
@@ -320,8 +398,177 @@ def history(db: Session, limit: int = HISTORY_CYCLES) -> list[dict]:
 # The three dashboards
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# The range report — what somebody actually did between two dates
+# --------------------------------------------------------------------------- #
+
+def _window(date_from: Optional[dt.date], date_to: Optional[dt.date]):
+    """The half-open UTC bounds for a pair of working-day dates.
+
+    Half-open on purpose: `< the day after` catches everything on the closing
+    day whatever the time, where `<= the day itself` would silently drop
+    anything logged after midnight UTC on it.
+    """
+    start = dt.datetime.combine(date_from, dt.time.min) if date_from else None
+    end = (dt.datetime.combine(date_to + dt.timedelta(days=1), dt.time.min)
+           if date_to else None)
+    return start, end
+
+
+def range_report(db: Session, profile_ids: Optional[Sequence[int]],
+                 date_from: Optional[dt.date],
+                 date_to: Optional[dt.date]) -> Optional[dict]:
+    """Everything that happened between two dates, for one set of profiles.
+
+    A different question from the rest of this module, and it needs its own
+    answer. Every other figure here is scoped to a *cycle* — what went out in
+    dispatch 14 — because that is the unit the work is organised in. This one
+    is scoped to a *fortnight*, because that is the unit people are asked
+    about: what did you do between the first and the fifteenth.
+
+    The two do not line up. A cycle opened on the 3rd is still being worked on
+    the 20th, and an application logged on the 20th belongs to the 20th no
+    matter which cycle put the job in front of somebody. So nothing here reads
+    `batches` at all: applications are dated by when they were recorded, work on
+    a list by when it was marked, and interviews by when they were held.
+
+    Returns None when no range was asked for. The report is the answer to a
+    question about dates, and inventing a default window would put a figure on
+    screen that nobody asked the question behind.
+    """
+    if not (date_from or date_to):
+        return None
+    if profile_ids is not None and not profile_ids:
+        return None
+
+    start, end = _window(date_from, date_to)
+
+    def in_window(query, column):
+        if start is not None:
+            query = query.where(column >= start)
+        if end is not None:
+            query = query.where(column < end)
+        return query
+
+    # ── What went out ─────────────────────────────────────────────────────
+    applied = in_window(
+        select(Application.job_id, Application.profile_id, Application.batch_id,
+               Application.created_at),
+        Application.created_at)
+    if profile_ids is not None:
+        applied = applied.where(Application.profile_id.in_(list(profile_ids)))
+    rows = db.execute(applied).all()
+
+    # Which of those the profile had put into the pool itself. A job it logged
+    # on its own sheet has a batch_applications row; one it was handed off
+    # somebody else's sheet and later marked applied does not. That is an exact
+    # split rather than a guess, and it is the one a BD asks for: of everything
+    # I sent this week, how much did I find.
+    own: set[tuple[int, int, int]] = set()
+    pairs = {(job_id, profile_id, batch_id)
+             for job_id, profile_id, batch_id, _ in rows if batch_id is not None}
+    if pairs:
+        for chunk in _chunks(sorted({job for job, _, _ in pairs})):
+            for job_id, profile_id, batch_id in db.execute(
+                select(BatchApplication.job_id, BatchApplication.profile_id,
+                       BatchApplication.batch_id)
+                .where(BatchApplication.job_id.in_(chunk))
+            ).all():
+                own.add((job_id, profile_id, batch_id))
+
+    own_found = sum(1 for job_id, profile_id, batch_id, _ in rows
+                    if (job_id, profile_id, batch_id) in own)
+
+    # ── What was turned down ──────────────────────────────────────────────
+    skipped_at = func.coalesce(Assignment.status_changed_at, Assignment.created_at)
+    skipped = in_window(
+        select(func.count(Assignment.id)).where(Assignment.status == "skipped"),
+        skipped_at)
+    if profile_ids is not None:
+        skipped = skipped.where(Assignment.profile_id.in_(list(profile_ids)))
+    skipped_count = db.scalar(skipped) or 0
+
+    # ── Effort per day ────────────────────────────────────────────────────
+    per_day: Counter = Counter()
+    for _, _, _, stamp in rows:
+        day = _working_day(stamp)
+        if day is not None:
+            per_day[day] += 1
+    span = ((date_to or _today()) - (date_from or min(per_day, default=_today()))).days + 1
+    span = max(1, span)
+    busiest = max(per_day.items(), key=lambda kv: kv[1], default=None)
+
+    # ── What came back ────────────────────────────────────────────────────
+    sittings = interviews.load(db, profile_ids)
+    if date_from or date_to:
+        sittings = [row for row in sittings
+                    if (date_from is None
+                        or working_label(row.scheduled_at)["day"] >= date_from.isoformat())
+                    and (date_to is None
+                         or working_label(row.scheduled_at)["day"] <= date_to.isoformat())]
+    live = [row for row in sittings if row.status in interviews.LIVE]
+    far = interviews.how_far(db, live)
+
+    # The clients who answered, one row per conversation rather than per
+    # sitting — "Northwind came back" is one fact however many calls it took.
+    lineage = interviews.chains(db, live) if live else {}
+    seen_roots: set[int] = set()
+    replied: list[dict] = []
+    for row in sorted(live, key=lambda r: r.scheduled_at, reverse=True):
+        root = (lineage.get(row.id) or {}).get("root", row.id)
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
+        replied.append({
+            "client": row.client or "—",
+            "role": row.role or "",
+            "stage": row.stage or "screening",
+            "outcome": row.outcome,
+            "rounds": (lineage.get(row.id) or {}).get("rounds", 1),
+            "when": working_label(row.scheduled_at),
+        })
+
+    total = len(rows)
+    return {
+        "from": date_from.isoformat() if date_from else None,
+        "to": date_to.isoformat() if date_to else None,
+        "days": span,
+        "applied": {
+            "total": total,
+            "own_found": own_found,
+            # Everything else went out against a posting a colleague found —
+            # the other half of the split, by construction.
+            "from_others": total - own_found,
+            "skipped": skipped_count,
+            "per_day": round(total / span, 1),
+            "active_days": len(per_day),
+            "busiest": ({"day": busiest[0].isoformat(), "count": busiest[1]}
+                        if busiest else None),
+        },
+        "heard_back": {
+            # Conversations, not sittings. A client who ran three rounds
+            # replied once.
+            "conversations": far["conversations"],
+            "rate": _pct(far["conversations"], total),
+            "clients": replied[:RECENT_ROWS],
+        },
+        "interviews": {
+            "sittings": len(live),
+            "completed": sum(1 for row in live
+                             if row.status in ("done", "no_show")),
+            "scheduled": sum(1 for row in live if row.status == "scheduled"),
+            "offers": sum(1 for row in live if row.outcome in interviews.WON),
+            "hired": sum(1 for row in live if row.outcome == "hired"),
+            "rejected": sum(1 for row in live if row.outcome == "rejected"),
+            **far,
+            "by_stage": interviews.by_stage(live),
+        },
+    }
+
+
 def for_person(db: Session, user: User, batch: Optional[Batch],
-               team_visible: bool) -> dict:
+               team_visible: bool, date_from: Optional[dt.date] = None,
+               date_to: Optional[dt.date] = None) -> dict:
     """What one person sees about their own work.
 
     A manager gets every profile here, because a manager who also runs one
@@ -333,8 +580,8 @@ def for_person(db: Session, user: User, batch: Optional[Batch],
     mine = list(db.scalars(query.order_by(Profile.name)))
     owners = {u.id: u.name for u in db.scalars(select(User))}
 
-    rows = profile_rows(db, mine, batch.id if batch else None, owners)
-    series = activity(db, [p.id for p in mine])
+    rows = profile_rows(db, mine, batch.id if batch else None, owners, date_from, date_to)
+    series = activity(db, [p.id for p in mine], date_from=date_from, date_to=date_to)
 
     totals = _rollup(rows)
     totals["profiles"] = len(rows)
@@ -346,12 +593,15 @@ def for_person(db: Session, user: User, batch: Optional[Batch],
             # What the typing produced. Every other figure on this screen goes
             # up when somebody works harder; these two only go up when the work
             # was worth sending.
-            "interviews": interviews.summary(db, ids),
-            "funnel": interviews.funnel(db, ids),
+            "interviews": interviews.summary(db, ids, date_from, date_to),
+            "funnel": interviews.funnel(db, ids, date_from=date_from, date_to=date_to),
             # The third thing a client can ask for, and the one with a deadline
             # on it. A BD who cannot see it here finds out a take-home was
             # missed from the client's next email.
             "assessments": assessments.summary(db, ids),
+            # What happened between two dates, when two dates were asked for.
+            # None the rest of the time — see range_report.
+            "report": range_report(db, ids, date_from, date_to),
             "team_visible": team_visible}
 
 
@@ -378,7 +628,8 @@ def team_board(db: Session, batch: Optional[Batch], include_private: bool) -> di
             "rows": rows, "hidden": hidden}
 
 
-def overview(db: Session, batch: Optional[Batch]) -> dict:
+def overview(db: Session, batch: Optional[Batch], date_from: Optional[dt.date] = None,
+             date_to: Optional[dt.date] = None) -> dict:
     """The manager's screen: the whole workspace in one pass."""
     profiles = list(db.scalars(select(Profile).where(Profile.is_active == True)  # noqa: E712
                                .order_by(Profile.name)))
@@ -386,7 +637,7 @@ def overview(db: Session, batch: Optional[Batch]) -> dict:
     owners = {u.id: u.name for u in users}
     batch_id = batch.id if batch else None
 
-    rows = profile_rows(db, profiles, batch_id, owners)
+    rows = profile_rows(db, profiles, batch_id, owners, date_from, date_to)
     for place, row in enumerate(rows, start=1):
         row["rank"] = place
     by_profile = {row["profile_id"]: row for row in rows}
@@ -445,22 +696,25 @@ def overview(db: Session, batch: Optional[Batch]) -> dict:
 
     return {"batch": _brief(batch), "batches": cycle_list(db),
             "org": org, "profiles": rows, "people": people, "missing": missing,
-            "activity": activity(db, None, days=ORG_ACTIVITY_DAYS),
+            "activity": activity(db, None, days=ORG_ACTIVITY_DAYS,
+                                  date_from=date_from, date_to=date_to),
             "history": history(db),
             # The other half of the job. Everything above says how much was
             # sent; this says what came back, and who is free to take it.
-            "interviews": interviews.summary(db),
-            "funnel": interviews.funnel(db),
+            "interviews": interviews.summary(db, date_from=date_from, date_to=date_to),
+            "funnel": interviews.funnel(db, date_from=date_from, date_to=date_to),
             "assessments": assessments.summary(db),
             "developers": interviews.developer_rows(db)}
 
 
-def profile_detail(db: Session, profile: Profile, batch: Optional[Batch]) -> dict:
+def profile_detail(db: Session, profile: Profile, batch: Optional[Batch],
+                   date_from: Optional[dt.date] = None,
+                   date_to: Optional[dt.date] = None) -> dict:
     """One profile, close up — for a manager checking on somebody, or a BD
     looking at their own record."""
     owners = {u.id: u.name for u in db.scalars(select(User))}
     batch_id = batch.id if batch else None
-    stats = profile_rows(db, [profile], batch_id, owners)[0]
+    stats = profile_rows(db, [profile], batch_id, owners, date_from, date_to)[0]
 
     recent = [
         {"title": job.title, "company": job.company, "platform": job.platform,
@@ -493,7 +747,8 @@ def profile_detail(db: Session, profile: Profile, batch: Optional[Batch]) -> dic
         per_cycle = [{"id": b.id, "name": b.name, "logged": logged.get(b.id, 0),
                       **placed[b.id]} for b in reversed(recent_cycles)]
 
-    series = activity(db, [profile.id], days=ORG_ACTIVITY_DAYS)
+    series = activity(db, [profile.id], days=ORG_ACTIVITY_DAYS,
+                      date_from=date_from, date_to=date_to)
     return {
         "batch": _brief(batch), "batches": cycle_list(db),
         "profile": {"id": profile.id, "name": profile.name,
@@ -513,13 +768,20 @@ def profile_detail(db: Session, profile: Profile, batch: Optional[Batch]) -> dic
                     "bio": profile.bio or ""},
         "stats": stats, "activity": series, "streak": streak(series),
         "recent": recent, "cycles": per_cycle,
-        "interviews": interviews.summary(db, [profile.id]),
-        "funnel": interviews.funnel(db, [profile.id]),
+        "interviews": interviews.summary(db, [profile.id], date_from, date_to),
+        "funnel": interviews.funnel(db, [profile.id], date_from=date_from, date_to=date_to),
         "assessments": assessments.summary(db, [profile.id]),
+        # Narrowed to this one identity, which is the difference between this
+        # and the same report on a person's dashboard: a BD running four
+        # profiles reads the person-wide one as their own week and this one as
+        # "how is Khuram doing".
+        "report": range_report(db, [profile.id], date_from, date_to),
     }
 
 
-def for_developer(db: Session, person: User, batch: Optional[Batch]) -> dict:
+def for_developer(db: Session, person: User, batch: Optional[Batch],
+                  date_from: Optional[dt.date] = None,
+                  date_to: Optional[dt.date] = None) -> dict:
     """A developer's own screen.
 
     The mirror of for_person, and pointed the other way. A BD's dashboard asks
@@ -538,7 +800,7 @@ def for_developer(db: Session, person: User, batch: Optional[Batch]) -> dict:
         .order_by(Profile.name)))
     owners = {u.id: u.name for u in db.scalars(select(User))}
 
-    rows = profile_rows(db, profiles, batch.id if batch else None, owners)
+    rows = profile_rows(db, profiles, batch.id if batch else None, owners, date_from, date_to)
     # The contact details a BD pastes into an application, alongside the
     # figures, because this is the screen where the developer keeps them right.
     detail = {p.id: p for p in profiles}
@@ -552,7 +814,8 @@ def for_developer(db: Session, person: User, batch: Optional[Batch]) -> dict:
                     "bio": profile.bio or "",
                     "platform": profile.platform or ""})
 
-    series = activity(db, [p.id for p in profiles], days=ORG_ACTIVITY_DAYS)
+    series = activity(db, [p.id for p in profiles], days=ORG_ACTIVITY_DAYS,
+                      date_from=date_from, date_to=date_to)
     totals = _rollup(rows)
     totals["profiles"] = len(rows)
 
@@ -563,4 +826,10 @@ def for_developer(db: Session, person: User, batch: Optional[Batch]) -> dict:
             # the diary is here and not behind the dashboard switch: it is not
             # a measurement of them, it is work they have been given.
             "assessments": assessments.summary(db, [p.id for p in profiles]),
-            **interviews.for_developer(db, person, profiles)}
+            # A developer's half of the range report. The applications half is
+            # in it too and is honest — they are the applications sent under
+            # this developer's identities — but their screen leads on the
+            # interviews, because that is the half they were in the room for.
+            "report": range_report(db, [p.id for p in profiles], date_from, date_to),
+            **interviews.for_developer(db, person, profiles,
+                                       date_from=date_from, date_to=date_to)}

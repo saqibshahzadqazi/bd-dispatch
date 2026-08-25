@@ -518,6 +518,61 @@ act on:
   **Open** on a row is that developer's own screen, and outcomes can be
   recorded from it — the person chasing them is usually the one looking.
 
+### Between two dates
+
+Every figure above is scoped to a **cycle** — what went out in dispatch 14 —
+because that is the unit the work is organised in. It is not the unit people
+are asked about. "What did you do between the first and the fifteenth" is a
+question about a fortnight, and a cycle opened on the 3rd is still being worked
+on the 20th.
+
+So the dashboards take a **From / To** pair, and setting one replaces the usual
+today-and-next-fortnight view rather than sitting beside it. Nothing in the
+report reads `batches` at all: applications are dated by when they were
+recorded, work on a list by when it was **marked**, and interviews by when they
+were **held**. A job dispatched on Monday and applied for on Friday belongs to
+Friday, because that is the day the work happened.
+
+A BD gets both halves:
+
+```
+1 Aug – 15 Aug · 15 days
+
+  140 applications      9.3 a day        11 days worked
+   92 you found         48 from colleagues      12 skipped
+
+  ███████████████████████████░░░░░░░░░░░    66% off your own search
+```
+
+The split is exact rather than a guess. A posting off this profile's own sheet
+has a `batch_applications` row; one handed over by the cycle and later marked
+applied does not. Those two numbers always add up to the total.
+
+Then what it produced — and this half is what a **developer** sees on their own
+desk, since they sent none of the applications:
+
+```
+  9 clients talked, across 14 interviews · 6% of what went out
+
+  11 held    3 to come    5 one round only    4 reached a 2nd    2 reached a 3rd
+  furthest one got: 4 rounds
+```
+
+**Conversations, not sittings.** A client who ran three rounds replied once, and
+counting rows would say a team that ran one long process with a single client
+had more second rounds than a team that reached four clients once each — the
+exact inversion of what the person asking wants to know. Under it, one row per
+client: who they were, what they were for, how far it got, how it ended.
+
+A chain is measured whole, in both directions. A screening call inside the
+window whose technical round lands next month still counts as reaching a second
+round, and last month's screening call does not become a second conversation
+just because this month's follow-up is in view. Clipping either end would make
+the answer depend on where the window happened to fall.
+
+The same report is on a **single profile's page**, narrowed to that identity —
+which is the difference between "my week" and "how is Khuram doing".
+
 ### Who may see whose numbers
 
 Two switches, and they answer different questions. The manager sees everything
@@ -858,6 +913,7 @@ backend/
     ingest.py     Spreadsheet reading and column auto-detection
     exports.py    Excel output — dispatched lists, the cycle report, the pipeline
     schema.py     The v1 -> v2 upgrade, and the columns added since
+  schema.sql      The whole Postgres schema, for review or for Supabase
   seed.py         First accounts, profiles, developers and the sample data
   test_matching.py, test_e2e.py, test_dashboard.py, test_developer.py,
   test_pipeline.py
@@ -880,9 +936,13 @@ frontend/
       Assessments.jsx      Take-homes: set on one side, done on the other
       AdminHome.jsx        Running cycles
       People.jsx           People, profiles, developers, and who is on the board
-      widgets.jsx          Tiles, sparklines, progress bars, the board, the
-                           funnel, the stage ladder, the stalled list and the
-                           take-home board
+      shell.jsx            Toasts, the command palette and the theme — the
+                           parts that outlive whichever screen is mounted
+      widgets.jsx          Tiles, sparklines, the board, the funnel, the stage
+                           ladder, the stalled list, the take-home board and
+                           the between-two-dates report
+    styles.css             The design system: one neutral ramp, four semantic
+                           families, and every component this app uses
 ```
 
 `dashboard.py` and `interviews.py` never write. A dashboard can be opened while

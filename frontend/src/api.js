@@ -76,7 +76,14 @@ export async function download(path, fallbackName) {
   URL.revokeObjectURL(url);
 }
 
-const query = (batchId) => (batchId ? `?batch_id=${batchId}` : "");
+const query = (batchId, dateFrom, dateTo) => {
+  const params = new URLSearchParams();
+  if (batchId) params.set("batch_id", batchId);
+  if (dateFrom) params.set("date_from", dateFrom);
+  if (dateTo) params.set("date_to", dateTo);
+  const text = params.toString();
+  return text ? `?${text}` : "";
+};
 
 export const api = {
   login: (email, password) => request("/auth/login", { method: "POST", body: { email, password } }),
@@ -121,22 +128,28 @@ export const api = {
 
   // A cycle is optional everywhere below: leave it off and the server opens on
   // the newest cycle still running.
-  dashboard: (batchId) => request(`/dashboard/me${query(batchId)}`),
+  dashboard: (batchId, dateFrom, dateTo) => request(`/dashboard/me${query(batchId, dateFrom, dateTo)}`),
   teamBoard: (batchId) => request(`/dashboard/team${query(batchId)}`),
-  overview: (batchId) => request(`/dashboard/overview${query(batchId)}`),
+  overview: (batchId, dateFrom, dateTo) => request(`/dashboard/overview${query(batchId, dateFrom, dateTo)}`),
   // One person's dashboard as they would see it. Manager only.
-  personDashboard: (userId, batchId) =>
-    request(`/dashboard/people/${userId}${query(batchId)}`),
-  profileDetail: (profileId, batchId) =>
-    request(`/dashboard/profiles/${profileId}${query(batchId)}`),
+  personDashboard: (userId, batchId, dateFrom, dateTo) =>
+    request(`/dashboard/people/${userId}${query(batchId, dateFrom, dateTo)}`),
+  profileDetail: (profileId, batchId, dateFrom, dateTo) =>
+    request(`/dashboard/profiles/${profileId}${query(batchId, dateFrom, dateTo)}`),
 
   mySheets: (batchId) => request(`/batches/${batchId}/my-sheets`),
 
   // Interviews. Scoped on the server from the token: a BD sees the profiles
   // they run, a developer the ones they are sold under, a manager everything.
   // Times go up and come back on the team's clock — see models.from_working.
-  interviews: (profileId) =>
-    request(`/interviews${profileId ? `?profile_id=${profileId}` : ""}`),
+  interviews: (profileId, dateFrom, dateTo) => {
+    const params = new URLSearchParams();
+    if (profileId) params.set("profile_id", profileId);
+    if (dateFrom) params.set("date_from", dateFrom);
+    if (dateTo) params.set("date_to", dateTo);
+    const text = params.toString();
+    return request(`/interviews${text ? `?${text}` : ""}`);
+  },
   createInterview: (payload) => request("/interviews", { method: "POST", body: payload }),
   updateInterview: (id, payload) =>
     request(`/interviews/${id}`, { method: "PATCH", body: payload }),
@@ -172,9 +185,9 @@ export const api = {
     `/pipeline.xlsx${profileId ? `?profile_id=${profileId}` : ""}`,
 
   // A developer's own screen, and a manager looking at one.
-  devDashboard: (batchId) => request(`/dashboard/dev${query(batchId)}`),
-  developerDashboard: (userId, batchId) =>
-    request(`/dashboard/devs/${userId}${query(batchId)}`),
+  devDashboard: (batchId, dateFrom, dateTo) => request(`/dashboard/dev${query(batchId, dateFrom, dateTo)}`),
+  developerDashboard: (userId, batchId, dateFrom, dateTo) =>
+    request(`/dashboard/devs/${userId}${query(batchId, dateFrom, dateTo)}`),
   setStatus: (assignmentId, status) =>
     request(`/assignments/${assignmentId}`, { method: "PATCH", body: { status } }),
 };

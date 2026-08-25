@@ -1,7 +1,8 @@
 import React from "react";
 import {
-  AssessmentBoard, CyclePicker, Funnel, InterviewRows, NextInterview,
-  ProfileCard, Sparkline, Stalled, TeamBoard, Tiles, sinceText,
+  AssessmentBoard, CyclePicker, DateRange, Funnel, InterviewRows, NextInterview,
+  ProfileCard, RangeReport, Sparkline, StageLadder, Stalled, TeamBoard, Tiles,
+  sinceText,
 } from "./widgets.jsx";
 
 /** One person's progress.
@@ -16,7 +17,8 @@ import {
  */
 export default function PersonDashboard({
   data, batchId, onBatchChange, onOpenWork,
-  board, showBoard, onToggleBoard, viewingAs = null, error = "",
+  board, showBoard, onToggleBoard, dateRange, onDateRangeChange,
+  viewingAs = null, error = "",
 }) {
   const { totals, profiles, batch } = data;
   const left = totals.pending;
@@ -27,6 +29,7 @@ export default function PersonDashboard({
   const diary = data.interviews;
   const next = diary?.today.find((row) => !row.is_past && row.status === "scheduled") || null;
   const tests = data.assessments;
+  const rangeActive = !!(dateRange?.dateFrom || dateRange?.dateTo);
 
   // Every label that names an owner, in one place. `whose` reads as "your" or
   // "Ali's"; `did` as "you logged" or "Ali logged".
@@ -58,10 +61,17 @@ export default function PersonDashboard({
               : "No cycle has been opened yet."}
           </p>
         </div>
-        <CyclePicker batches={data.batches} value={batchId || batch?.id} onChange={onBatchChange} />
+        <div className="stack" style={{ alignItems: "flex-end", gap: 8 }}>
+          <CyclePicker batches={data.batches} value={batchId || batch?.id} onChange={onBatchChange} />
+          {onDateRangeChange && <DateRange {...dateRange} onChange={onDateRangeChange} />}
+        </div>
       </div>
 
       {error && <div className="notice">{error}</div>}
+
+      {/* Only when a range was asked for. The server returns null otherwise,
+          so there is no default window inventing a figure. */}
+      <RangeReport report={data.report} whose={viewingAs || "your"} />
 
       {next && (
         <NextInterview row={next} onOpen={onOpenWork}
@@ -93,16 +103,18 @@ export default function PersonDashboard({
       </section>
 
       <Tiles items={[
-        { label: `jobs ${did("logged")} this cycle`, value: totals.logged },
+        { label: `jobs ${did("found")} this cycle`, value: totals.own_found },
+        { label: "jobs found by colleagues", value: totals.from_others },
         { label: "a colleague also found", value: totals.duplicates,
           tone: totals.duplicates ? "brick" : undefined,
           hint: "Postings this profile and somebody else both typed in. Time spent twice on one search." },
         { label: `handed to ${viewingAs || "you"} this cycle`, value: totals.assigned },
         { label: `${did("marked")} applied`, value: totals.applied, tone: "pine" },
+        { label: `${did("marked")} skipped`, value: totals.skipped },
         { label: `of ${whose} list worked through`, value: `${totals.done_pct}%` },
         { label: `day${data.streak === 1 ? "" : "s"} logging in a row`, value: data.streak,
           hint: "Consecutive working days with at least one job logged. Today does not break it until tomorrow." },
-        diary && { label: "interviews today", value: diary.counts.today,
+        diary && !rangeActive && { label: "interviews today", value: diary.counts.today,
           tone: diary.counts.today ? "petrol" : undefined,
           foot: diary.counts.week ? `${diary.counts.week} in seven days` : undefined,
           hint: "Against the profiles these figures cover. Eastern time." },
@@ -127,6 +139,7 @@ export default function PersonDashboard({
             </p>
           </div>
           <Funnel data={data.funnel} awaiting={diary.counts.awaiting_outcome} />
+          {!rangeActive && <StageLadder rows={data.funnel.by_stage} />}
 
           {diary.today.length > 0 && (
             <div>
@@ -141,6 +154,14 @@ export default function PersonDashboard({
               <h3>Coming up</h3>
               <div style={{ marginTop: 8 }}>
                 <InterviewRows rows={diary.upcoming.slice(0, 8)} showProfile />
+              </div>
+            </div>
+          )}
+          {dateRange && (dateRange.dateFrom || dateRange.dateTo) && diary.recent.length > 0 && (
+            <div>
+              <h3>Interviews in this range</h3>
+              <div style={{ marginTop: 8 }}>
+                <InterviewRows rows={diary.recent} showProfile />
               </div>
             </div>
           )}
