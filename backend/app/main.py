@@ -1503,6 +1503,7 @@ def set_status(assignment_id: int, body: StatusIn, db: Session = Depends(get_db)
     if body.status not in ("pending", "applied", "skipped"):
         raise HTTPException(400, "Status must be pending, applied or skipped.")
     row.status = body.status
+    row.status_changed_at = utcnow()
 
     # Marking it applied closes the loop: it counts as this profile's history
     # from now on, so no later cycle offers it again.
@@ -1558,15 +1559,18 @@ def update_settings(body: SettingsIn, db: Session = Depends(get_db),
 # Dashboards
 # --------------------------------------------------------------------------- #
 
-def _person_dashboard(db: Session, person: User, batch_id: Optional[int]) -> dict:
+def _person_dashboard(db: Session, person: User, batch_id: Optional[int],
+                      date_from: Optional[dt.date], date_to: Optional[dt.date]) -> dict:
     board_open = read_settings(db)["team_board_visible"] or person.role == "admin"
     return {**dashboard.for_person(db, person, dashboard.pick_batch(db, batch_id),
-                                   team_visible=board_open),
+                                   team_visible=board_open, date_from=date_from,
+                                   date_to=date_to),
             "person": user_json(person)}
 
 
 @app.get("/api/dashboard/me")
-def dashboard_me(batch_id: Optional[int] = None, db: Session = Depends(get_db),
+def dashboard_me(batch_id: Optional[int] = None, date_from: Optional[dt.date] = None,
+                 date_to: Optional[dt.date] = None, db: Session = Depends(get_db),
                  user: User = Depends(current_user)):
     """Your own progress — but only once a manager has opened it for you.
 
@@ -1574,11 +1578,14 @@ def dashboard_me(batch_id: Optional[int] = None, db: Session = Depends(get_db),
     the same as refusing a request.
     """
     require_dashboard(user)
-    return _person_dashboard(db, user, batch_id)
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "The start date must be before the end date.")
+    return _person_dashboard(db, user, batch_id, date_from, date_to)
 
 
 @app.get("/api/dashboard/people/{user_id}")
 def dashboard_person(user_id: int, batch_id: Optional[int] = None,
+                     date_from: Optional[dt.date] = None, date_to: Optional[dt.date] = None,
                      db: Session = Depends(get_db), _: User = Depends(admin_only)):
     """One person's dashboard, exactly as they would see it.
 
@@ -1589,7 +1596,9 @@ def dashboard_person(user_id: int, batch_id: Optional[int] = None,
     person = db.get(User, user_id)
     if person is None:
         raise HTTPException(404, "No such person.")
-    return _person_dashboard(db, person, batch_id)
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "The start date must be before the end date.")
+    return _person_dashboard(db, person, batch_id, date_from, date_to)
 
 
 @app.get("/api/dashboard/team")
@@ -1608,14 +1617,18 @@ def dashboard_team(batch_id: Optional[int] = None, db: Session = Depends(get_db)
 
 
 @app.get("/api/dashboard/overview")
-def dashboard_overview(batch_id: Optional[int] = None, db: Session = Depends(get_db),
+def dashboard_overview(batch_id: Optional[int] = None, date_from: Optional[dt.date] = None,
+                       date_to: Optional[dt.date] = None, db: Session = Depends(get_db),
                        _: User = Depends(admin_only)):
-    return {**dashboard.overview(db, dashboard.pick_batch(db, batch_id)),
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "The start date must be before the end date.")
+    return {**dashboard.overview(db, dashboard.pick_batch(db, batch_id), date_from, date_to),
             "settings": read_settings(db)}
 
 
 @app.get("/api/dashboard/profiles/{profile_id}")
 def dashboard_profile(profile_id: int, batch_id: Optional[int] = None,
+                      date_from: Optional[dt.date] = None, date_to: Optional[dt.date] = None,
                       db: Session = Depends(get_db), user: User = Depends(current_user)):
     """One profile close up. `linked_profile` is what stops a BD opening a
     colleague's record — the team board shows totals, not somebody else's diary.
@@ -1628,11 +1641,15 @@ def dashboard_profile(profile_id: int, batch_id: Optional[int] = None,
     profile = linked_profile(profile_id, db, user)
     if not (user.role == "dev" and profile.dev_user_id == user.id):
         require_dashboard(user)
-    return dashboard.profile_detail(db, profile, dashboard.pick_batch(db, batch_id))
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "The start date must be before the end date.")
+    return dashboard.profile_detail(db, profile, dashboard.pick_batch(db, batch_id),
+                                    date_from, date_to)
 
 
 @app.get("/api/dashboard/dev")
-def dashboard_developer(batch_id: Optional[int] = None, db: Session = Depends(get_db),
+def dashboard_developer(batch_id: Optional[int] = None, date_from: Optional[dt.date] = None,
+                        date_to: Optional[dt.date] = None, db: Session = Depends(get_db),
                         user: User = Depends(current_user)):
     """A developer's own screen: their calendar, their identities, their record.
 
@@ -1642,17 +1659,24 @@ def dashboard_developer(batch_id: Optional[int] = None, db: Session = Depends(ge
     """
     if user.role not in ("dev", "admin"):
         raise HTTPException(403, "This screen is for the developers behind the profiles.")
-    return dashboard.for_developer(db, user, dashboard.pick_batch(db, batch_id))
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "The start date must be before the end date.")
+    return dashboard.for_developer(db, user, dashboard.pick_batch(db, batch_id),
+                                   date_from, date_to)
 
 
 @app.get("/api/dashboard/devs/{user_id}")
 def dashboard_developer_as(user_id: int, batch_id: Optional[int] = None,
+                           date_from: Optional[dt.date] = None, date_to: Optional[dt.date] = None,
                            db: Session = Depends(get_db), _: User = Depends(admin_only)):
     """One developer's screen, exactly as they see it. Manager only."""
     person = db.get(User, user_id)
     if person is None:
         raise HTTPException(404, "No such person.")
-    return dashboard.for_developer(db, person, dashboard.pick_batch(db, batch_id))
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "The start date must be before the end date.")
+    return dashboard.for_developer(db, person, dashboard.pick_batch(db, batch_id),
+                                   date_from, date_to)
 
 
 # --------------------------------------------------------------------------- #
@@ -1711,7 +1735,10 @@ def _interview_json(db: Session, row: Interview) -> dict:
 
 
 @app.get("/api/interviews")
-def list_interviews(profile_id: Optional[int] = None, db: Session = Depends(get_db),
+def list_interviews(profile_id: Optional[int] = None,
+                    date_from: Optional[dt.date] = None,
+                    date_to: Optional[dt.date] = None,
+                    db: Session = Depends(get_db),
                     user: User = Depends(current_user)):
     """Today, what is coming, what just happened — for whoever is asking.
 
@@ -1724,15 +1751,21 @@ def list_interviews(profile_id: Optional[int] = None, db: Session = Depends(get_
         ids: Optional[list[int]] = [profile_id]
     else:
         ids = visible_profile_ids(db, user)
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(400, "The start date must be before the end date.")
     rows = interviews.decorate(db, interviews.load(db, ids))
+    if date_from or date_to:
+        rows = [row for row in rows
+                if (date_from is None or row["when"]["day"] >= date_from.isoformat())
+                and (date_to is None or row["when"]["day"] <= date_to.isoformat())]
     return {"rows": rows, "counts": interviews.counts(rows),
-            "funnel": interviews.funnel(db, ids),
+            "funnel": interviews.funnel(db, ids, date_from=date_from, date_to=date_to),
             # What the scheduling form starts on. Worked out here rather than
             # in the browser: the field means Eastern, and a machine in Karachi
             # prefilling its own clock would suggest a time nine hours from the
             # one it appears to say.
             "suggested_time": working_label(utcnow() + dt.timedelta(hours=1))["input"],
-            **interviews.split(rows)}
+            **interviews.split(rows, date_range=bool(date_from or date_to))}
 
 
 @app.post("/api/interviews", status_code=201)

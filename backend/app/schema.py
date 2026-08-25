@@ -103,6 +103,9 @@ LATER_COLUMNS = {
     "users": [
         ("dashboard_visible", "BOOLEAN DEFAULT FALSE"),
     ],
+    "assignments": [
+        ("status_changed_at", "TIMESTAMP"),
+    ],
 }
 
 

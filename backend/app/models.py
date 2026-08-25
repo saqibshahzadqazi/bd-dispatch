@@ -376,6 +376,7 @@ class Assignment(Base):
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
     status = Column(String(16), default="pending")  # pending | applied | skipped
     exclusive = Column(Boolean, nullable=False, default=False)
+    status_changed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     __table_args__ = (
         UniqueConstraint("batch_id", "job_id", "profile_id", name="uq_job_per_profile"),

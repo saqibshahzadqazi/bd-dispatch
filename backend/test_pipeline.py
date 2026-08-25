@@ -500,12 +500,17 @@ def test_a_late_joiner_is_given_jobs_not_given_away(client, admin, bd, make_prof
 # Rounds — one conversation, several sittings
 # --------------------------------------------------------------------------- #
 
-def sat(client, headers, profile_id, days=-3, clock="10:00", **extra):
-    """An interview that has already been and gone, unless days says otherwise."""
+def sat(web, headers, profile_id, days=-3, clock="10:00", **extra):
+    """An interview that has already been and gone, unless days says otherwise.
+
+    The test client is `web` here, not `client`, so that `client="Northwind"`
+    stays available as what it means everywhere else in this app — the company
+    on the other end of the call. Same reason as `book()` above.
+    """
     body = {"profile_id": profile_id, "scheduled_at": when(days, clock),
             "client": "Larkspur Data", "role": "RAG Developer"}
     body.update(extra)
-    response = client.post("/api/interviews", json=body, headers=headers)
+    response = web.post("/api/interviews", json=body, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -923,3 +928,224 @@ def test_the_take_home_applied_date_is_this_profiles_own(client, bd, applied):
                           json={"profile_id": profile_id, "job_id": overlap["job_id"],
                                 "title": "Shared posting"}, headers=bd).json()
         assert row["job"]["applied_on"] == expected["applied_on"]
+
+
+# --------------------------------------------------------------------------- #
+# The range report — what somebody did between two dates
+# --------------------------------------------------------------------------- #
+
+def today_iso():
+    from app.models import working_today
+    return working_today().isoformat()
+
+
+def days_ago(n):
+    import datetime as _dt
+    from app.models import working_today
+    return (working_today() - _dt.timedelta(days=n)).isoformat()
+
+
+def test_no_dates_means_no_report(client, bd, applied):
+    """The report answers a question about dates. Inventing a default window
+    would put a figure on screen nobody asked the question behind."""
+    assert client.get("/api/dashboard/me", headers=bd).json()["report"] is None
+
+
+def test_the_report_splits_what_you_found_from_what_you_were_handed(
+        client, admin, bd, applied):
+    """The number a BD is actually asked for at the end of a week: of
+    everything that went out, how much did I find myself.
+
+    An application against a posting off this profile's own sheet is one it
+    found; one against a posting a colleague found and the cycle handed over is
+    not. The split is exact — a logged job has a batch_applications row and a
+    dispatched one does not — rather than a guess.
+    """
+    profile = applied["profile"]["id"]
+    report = client.get(
+        f"/api/dashboard/me?date_from={days_ago(30)}&date_to={today_iso()}",
+        headers=bd).json()["report"]
+
+    assert report is not None
+    sent = report["applied"]
+    # The fixture hands in six postings on this profile's own sheet.
+    assert sent["own_found"] >= 6
+    # Nothing has been marked applied off the dispatched list yet.
+    assert sent["from_others"] == 0
+    assert sent["total"] == sent["own_found"] + sent["from_others"]
+
+    # Now work one job off the list somebody else found.
+    sheets = client.get(f"/api/batches/{applied['batch']}/my-sheets",
+                        headers=bd).json()["profiles"]
+    mine = next(p for p in sheets if p["id"] == profile)
+    assert mine["jobs"], "the fixture is meant to dispatch something here"
+    client.patch(f"/api/assignments/{mine['jobs'][0]['id']}",
+                 json={"status": "applied"}, headers=bd)
+
+    after = client.get(
+        f"/api/dashboard/me?date_from={days_ago(30)}&date_to={today_iso()}",
+        headers=bd).json()["report"]["applied"]
+    assert after["from_others"] == 1
+    assert after["total"] == after["own_found"] + after["from_others"]
+
+
+def test_the_report_counts_what_was_turned_down(client, bd, applied):
+    profile = applied["profile"]["id"]
+    sheets = client.get(f"/api/batches/{applied['batch']}/my-sheets",
+                        headers=bd).json()["profiles"]
+    mine = next(p for p in sheets if p["id"] == profile)
+    client.patch(f"/api/assignments/{mine['jobs'][0]['id']}",
+                 json={"status": "skipped"}, headers=bd)
+
+    report = client.get(
+        f"/api/dashboard/me?date_from={days_ago(30)}&date_to={today_iso()}",
+        headers=bd).json()["report"]
+    assert report["applied"]["skipped"] == 1
+
+
+def test_the_report_averages_over_the_window_asked_for(client, bd, applied):
+    """Per-day is over the days requested, not the days worked — a fortnight
+    with one busy Tuesday averages low, and that is the honest answer."""
+    report = client.get(
+        f"/api/dashboard/me?date_from={days_ago(9)}&date_to={today_iso()}",
+        headers=bd).json()["report"]
+    assert report["days"] == 10
+    assert report["applied"]["per_day"] == round(report["applied"]["total"] / 10, 1)
+    assert report["applied"]["active_days"] >= 1
+    assert report["applied"]["busiest"]["count"] >= 1
+
+
+def test_a_window_before_any_work_is_empty_rather_than_missing(client, bd, applied):
+    report = client.get(
+        f"/api/dashboard/me?date_from={days_ago(400)}&date_to={days_ago(380)}",
+        headers=bd).json()["report"]
+    assert report["applied"]["total"] == 0
+    assert report["heard_back"]["conversations"] == 0
+    assert report["interviews"]["sittings"] == 0
+
+
+def test_how_far_counts_conversations_not_sittings(client, bd, dev, applied):
+    """"How many clients did I reach a second round with" is a question about
+    clients. A chain of three sittings is one answer to it, not three —
+    counting rows would say a team that ran one long process beat a team that
+    reached four clients once each."""
+    profile = applied["profile"]["id"]
+
+    # One client, three rounds.
+    first = sat(client, bd, profile, days=-4, stage="screening", client="Longhaul Ltd")
+    second = client.post(f"/api/interviews/{first['id']}/next-round",
+                         json={"scheduled_at": when(-3, "10:00")}, headers=bd).json()
+    client.post(f"/api/interviews/{second['id']}/next-round",
+                json={"scheduled_at": when(-2, "10:00")}, headers=bd)
+
+    # Two clients, one round each.
+    sat(client, bd, profile, days=-4, clock="12:00", client="Oneshot A")
+    sat(client, bd, profile, days=-4, clock="13:00", client="Oneshot B")
+
+    report = client.get(
+        f"/api/dashboard/profiles/{profile}?date_from={days_ago(10)}"
+        f"&date_to={today_iso()}", headers=bd).json()["report"]["interviews"]
+
+    assert report["sittings"] == 5            # five calls happened
+    assert report["conversations"] == 3       # with three clients
+    assert report["one_round"] == 2           # two never went past the first
+    assert report["two_plus"] == 1            # one did
+    assert report["three_plus"] == 1
+    assert report["furthest"] == 3
+
+
+def test_a_chain_starting_before_the_window_is_still_one_conversation(
+        client, bd, applied):
+    """A report on this week must not turn last week's screening call into a
+    second client."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile, days=-20, stage="screening", client="Carryover Co")
+    client.post(f"/api/interviews/{first['id']}/next-round",
+                json={"scheduled_at": when(-2, "11:00")}, headers=bd)
+
+    # A window that contains only the second round.
+    report = client.get(
+        f"/api/dashboard/profiles/{profile}?date_from={days_ago(5)}"
+        f"&date_to={today_iso()}", headers=bd).json()["report"]["interviews"]
+    assert report["sittings"] == 1
+    assert report["conversations"] == 1
+    assert report["two_plus"] == 1            # the chain is two long, not one
+    assert report["one_round"] == 0
+
+
+def test_the_report_names_the_clients_that_came_back(client, bd, applied):
+    """One row per conversation. A client who ran three rounds replied once."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile, days=-3, client="Northwind Digital")
+    client.post(f"/api/interviews/{first['id']}/next-round",
+                json={"scheduled_at": when(-2, "14:00")}, headers=bd)
+
+    heard = client.get(
+        f"/api/dashboard/profiles/{profile}?date_from={days_ago(10)}"
+        f"&date_to={today_iso()}", headers=bd).json()["report"]["heard_back"]
+
+    named = [row["client"] for row in heard["clients"]]
+    assert named.count("Northwind Digital") == 1
+    assert heard["conversations"] == len(heard["clients"])
+    assert 0 <= heard["rate"] <= 100
+
+
+def test_a_developer_gets_the_same_report_for_their_own_identities(
+        client, dev, bd, applied):
+    profile = applied["profile"]["id"]
+    sat(client, bd, profile, days=-2, client="Their Client")
+
+    report = client.get(
+        f"/api/dashboard/dev?date_from={days_ago(10)}&date_to={today_iso()}",
+        headers=dev).json()["report"]
+    assert report is not None
+    assert report["interviews"]["sittings"] >= 1
+    assert report["interviews"]["conversations"] >= 1
+
+
+def test_a_backwards_range_is_refused(client, bd):
+    refused = client.get(
+        f"/api/dashboard/me?date_from={today_iso()}&date_to={days_ago(5)}",
+        headers=bd)
+    assert refused.status_code == 400
+
+
+def test_the_diary_narrows_to_the_range_and_drops_the_usual_lists(
+        client, bd, applied):
+    """A date range replaces "today / next fortnight" rather than sitting
+    beside it — the question was about those dates, not about this week."""
+    profile = applied["profile"]["id"]
+    sat(client, bd, profile, days=-3, client="In Range")
+    sat(client, bd, profile, days=3, clock="09:00", client="Out Of Range")
+
+    ranged = client.get(
+        f"/api/interviews?profile_id={profile}&date_from={days_ago(10)}"
+        f"&date_to={today_iso()}", headers=bd).json()
+
+    assert ranged["today"] == [] and ranged["upcoming"] == []
+    named = {row["client"] for row in ranged["recent"]}
+    assert "In Range" in named
+    assert "Out Of Range" not in named
+
+
+def test_a_chain_ending_after_the_window_still_counts_as_two_rounds(
+        client, bd, applied):
+    """The mirror of the test above, and the one that catches a chain walked in
+    only one direction. A screening call this week that already has a technical
+    round booked for next month reached a second round — saying "one round
+    only" because the second is outside the window would be the report
+    contradicting the diary."""
+    profile = applied["profile"]["id"]
+    first = sat(client, bd, profile, days=-1, stage="screening", client="Ahead Ltd")
+    client.post(f"/api/interviews/{first['id']}/next-round",
+                json={"scheduled_at": when(20, "11:00")}, headers=bd)
+
+    # A window holding only the first round.
+    report = client.get(
+        f"/api/dashboard/profiles/{profile}?date_from={days_ago(3)}"
+        f"&date_to={today_iso()}", headers=bd).json()["report"]["interviews"]
+    assert report["sittings"] == 1
+    assert report["conversations"] == 1
+    assert report["two_plus"] == 1
+    assert report["one_round"] == 0
+    assert report["furthest"] == 2

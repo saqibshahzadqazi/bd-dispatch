@@ -3,9 +3,9 @@ import { api } from "../api.js";
 import Assessments from "./Assessments.jsx";
 import Interviews from "./Interviews.jsx";
 import {
-  AssessmentBoard, Availability, CopyButton, CyclePicker, Empty, Funnel,
-  InterviewRows, Loading, NextInterview, Segment, Skills, Sparkline, Stalled,
-  Tiles,
+  AssessmentBoard, Availability, CopyButton, CyclePicker, DateRange, Empty,
+  Funnel, InterviewRows, Loading, NextInterview, RangeReport, Segment, Skills,
+  Sparkline, Stalled, Tiles,
 } from "./widgets.jsx";
 
 /** A developer's own screen.
@@ -37,6 +37,7 @@ import {
 export default function DevHome({ onOpenProfiles, pane: jumpTo = null, onPaneSeen }) {
   const [data, setData] = useState(null);
   const [batchId, setBatchId] = useState(null);
+  const [dateRange, setDateRange] = useState({ dateFrom: "", dateTo: "" });
   const [profiles, setProfiles] = useState([]);
   const [error, setError] = useState("");
   // null is every identity at once. Anything else is one profile's id, and the
@@ -59,14 +60,14 @@ export default function DevHome({ onOpenProfiles, pane: jumpTo = null, onPaneSee
 
   const load = useCallback(async (id) => {
     try {
-      const next = await api.devDashboard(id);
+      const next = await api.devDashboard(id, dateRange.dateFrom, dateRange.dateTo);
       setData(next);
       if (!id && next.batch) setBatchId(next.batch.id);
       setError("");
     } catch (err) {
       setError(err.message);
     }
-  }, []);
+  }, [dateRange]);
 
   useEffect(() => { load(batchId); }, [batchId, load]);
   useEffect(() => { api.listProfiles().then(setProfiles).catch(() => setProfiles([])); }, []);
@@ -85,13 +86,13 @@ export default function DevHome({ onOpenProfiles, pane: jumpTo = null, onPaneSee
       return undefined;
     }
     let live = true;
-    const pull = () => api.interviews(only)
+    const pull = () => api.interviews(only, dateRange.dateFrom, dateRange.dateTo)
       .then((next) => { if (live) setScoped(next); })
       .catch((err) => { if (live) setError(err.message); });
     pull();
     const tick = setInterval(pull, 60000);
     return () => { live = false; clearInterval(tick); };
-  }, [only]);
+  }, [only, dateRange]);
 
   // A BD can set a take-home at any moment, and the deadline on it is usually
   // days rather than weeks.
@@ -125,7 +126,7 @@ export default function DevHome({ onOpenProfiles, pane: jumpTo = null, onPaneSee
   const report = (id, patch) => api.updateInterview(id, patch)
     .then(async (saved) => {
       await load(batchId);
-      if (only) setScoped(await api.interviews(only));
+      if (only) setScoped(await api.interviews(only, dateRange.dateFrom, dateRange.dateTo));
       return saved;
     })
     .catch((e) => { setError(e.message); return null; });
@@ -137,7 +138,7 @@ export default function DevHome({ onOpenProfiles, pane: jumpTo = null, onPaneSee
   const advance = (row) => api.nextRound(row.id)
     .then(async (made) => {
       await load(batchId);
-      if (only) setScoped(await api.interviews(only));
+      if (only) setScoped(await api.interviews(only, dateRange.dateFrom, dateRange.dateTo));
       return made;
     })
     .catch((e) => { setError(e.message); return null; });
@@ -161,17 +162,26 @@ export default function DevHome({ onOpenProfiles, pane: jumpTo = null, onPaneSee
           <h1>Your desk</h1>
           <p className="muted" style={{ marginTop: 3 }}>
             {chosen && <>As <b>{chosen.name}</b>. </>}
-            {counts.today
+            {dateRange.dateFrom || dateRange.dateTo
+              ? `${funnel.interviews} interviews in the selected range.`
+              : counts.today
               ? <>You have <b>{counts.today} interview{counts.today === 1 ? "" : "s"} today</b>. All times Eastern.</>
               : counts.scheduled
                 ? <>Nothing today. {counts.scheduled} still ahead of you, Eastern time.</>
                 : "Nothing in the diary. Your team is applying under your name; replies land here."}
           </p>
         </div>
-        <CyclePicker batches={data.batches} value={batchId || data.batch?.id} onChange={setBatchId} />
+        <div className="stack" style={{ alignItems: "flex-end", gap: 8 }}>
+          <CyclePicker batches={data.batches} value={batchId || data.batch?.id} onChange={setBatchId} />
+          <DateRange {...dateRange} onChange={setDateRange} />
+        </div>
       </div>
 
       {error && <div className="notice">{error}</div>}
+
+      {/* Only when a range was asked for; the server returns null otherwise.
+          A developer sees the interview half — they sent no applications. */}
+      <RangeReport report={data.report} show="interviews" />
 
       {data.profiles.length > 1 && (
         <section className="card pad">
@@ -211,7 +221,8 @@ export default function DevHome({ onOpenProfiles, pane: jumpTo = null, onPaneSee
         value={pane}
         onChange={setPane}
         items={[
-          { key: "desk", label: "Today", count: counts.today, tone: "a" },
+            { key: "desk", label: dateRange.dateFrom || dateRange.dateTo ? "Range" : "Today",
+              count: dateRange.dateFrom || dateRange.dateTo ? funnel.interviews : counts.today, tone: "a" },
           { key: "diary", label: "Every interview", count: counts.total },
           { key: "assessments", label: "Assessments",
             count: tests?.counts.open,

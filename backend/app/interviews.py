@@ -111,14 +111,32 @@ def chains(db: Session, rows: Sequence[Interview]) -> dict[int, dict]:
         return {}
     known: dict[int, Interview] = {row.id: row for row in rows}
 
-    # Walk up until nothing new is needed. Chains are two or three long in
-    # practice, so this closes almost always on the first pass.
+    # Walk out to the whole conversation in both directions, so a chain reads
+    # the same however the caller sliced its input. Up finds the rounds before
+    # these; down finds the rounds after.
+    #
+    # Both matter, and for the same reason. A report on August must not call
+    # July's screening call a second conversation, and it must not call a
+    # conversation "one round" because the technical round lands in September.
+    # Walking only one way makes the answer depend on which end of the chain
+    # the window happened to clip.
+    #
+    # Chains are two or three long in practice, so each loop closes on the
+    # first pass almost always; the bound is a guard, not a budget.
     for _ in range(len(INTERVIEW_STAGES) + 1):
         wanted = {row.previous_id for row in known.values()
                   if row.previous_id and row.previous_id not in known}
         if not wanted:
             break
         found = list(db.scalars(select(Interview).where(Interview.id.in_(wanted))))
+        if not found:
+            break
+        known.update({row.id: row for row in found})
+
+    for _ in range(len(INTERVIEW_STAGES) + 1):
+        found = [row for row in db.scalars(
+            select(Interview).where(Interview.previous_id.in_(list(known))))
+            if row.id not in known]
         if not found:
             break
         known.update({row.id: row for row in found})
@@ -150,6 +168,11 @@ def chains(db: Session, rows: Sequence[Interview]) -> dict[int, dict]:
     for row in rows:
         previous = known.get(row.previous_id) if row.previous_id else None
         out[row.id] = {
+            # The first conversation in this chain. Rows that share a root are
+            # one client talking to one identity, however many sittings it
+            # took — which is the unit a report counts, rather than the
+            # sittings themselves.
+            "root": root_of.get(row.id, row.id),
             "round": depth_of.get(row.id, 1),
             "rounds": total_for_root.get(root_of.get(row.id, row.id), 1),
             "follows": ({"id": previous.id,
@@ -293,12 +316,18 @@ def decorate(db: Session, rows: Sequence[Interview]) -> list[dict]:
 
 
 def split(rows: Sequence[dict], upcoming_days: int = UPCOMING_DAYS,
-          recent: int = RECENT_ROWS) -> dict:
+          recent: int = RECENT_ROWS, date_range: bool = False) -> dict:
     """One decorated list, cut into the three lists a screen shows.
 
     Today keeps everything, including an interview that finished an hour ago —
     a person looking at their day wants the whole of it, not the rest of it.
     """
+    if date_range:
+        ordered = sorted(rows, key=lambda row: row["when"]["iso"], reverse=True)
+        return {"today": [], "upcoming": [], "recent": ordered,
+                "awaiting_time": [row for row in ordered if row["is_draft"]],
+                "stalled": [row for row in ordered if row["cleared_nothing_next"]]}
+
     today = working_today()
     horizon = today + dt.timedelta(days=upcoming_days)
 
@@ -366,10 +395,16 @@ def counts(rows: Sequence[dict]) -> dict:
     }
 
 
-def summary(db: Session, profile_ids: Optional[Sequence[int]] = None) -> dict:
+def summary(db: Session, profile_ids: Optional[Sequence[int]] = None,
+            date_from: Optional[dt.date] = None,
+            date_to: Optional[dt.date] = None) -> dict:
     """Today, what is coming, what just happened, and the counts behind them."""
     rows = decorate(db, load(db, profile_ids))
-    return {**split(rows), "counts": counts(rows)}
+    if date_from or date_to:
+        rows = [row for row in rows
+                if (date_from is None or row["when"]["day"] >= date_from.isoformat())
+                and (date_to is None or row["when"]["day"] <= date_to.isoformat())]
+    return {**split(rows, date_range=bool(date_from or date_to)), "counts": counts(rows)}
 
 
 # --------------------------------------------------------------------------- #
@@ -377,7 +412,9 @@ def summary(db: Session, profile_ids: Optional[Sequence[int]] = None) -> dict:
 # --------------------------------------------------------------------------- #
 
 def funnel(db: Session, profile_ids: Optional[Sequence[int]] = None,
-           batch_id: Optional[int] = None) -> dict:
+           batch_id: Optional[int] = None,
+           date_from: Optional[dt.date] = None,
+           date_to: Optional[dt.date] = None) -> dict:
     """Applications in, interviews out, offers at the end of it.
 
     The first figure in this product that a team cannot improve by typing
@@ -396,6 +433,14 @@ def funnel(db: Session, profile_ids: Optional[Sequence[int]] = None,
             BatchApplication.batch_id == batch_id)
         if profile_ids is not None:
             query = query.where(BatchApplication.profile_id.in_(list(profile_ids)))
+        if date_from or date_to:
+            query = query.join(Application, (Application.job_id == BatchApplication.job_id) &
+                               (Application.profile_id == BatchApplication.profile_id))
+            if date_from:
+                query = query.where(Application.created_at >= dt.datetime.combine(date_from, dt.time.min))
+            if date_to:
+                query = query.where(Application.created_at < dt.datetime.combine(
+                    date_to + dt.timedelta(days=1), dt.time.min))
     else:
         query = select(func.count(Application.id))
         if profile_ids is not None:
@@ -403,6 +448,10 @@ def funnel(db: Session, profile_ids: Optional[Sequence[int]] = None,
     applications = db.scalar(query) or 0
 
     rows = load(db, profile_ids)
+    if date_from or date_to:
+        rows = [row for row in rows
+                if (date_from is None or working_label(row.scheduled_at)["day"] >= date_from.isoformat())
+                and (date_to is None or working_label(row.scheduled_at)["day"] <= date_to.isoformat())]
     live = [row for row in rows if row.status in LIVE]
     passed = sum(1 for row in live if row.outcome in CLEARED)
     offers = sum(1 for row in live if row.outcome in WON)
@@ -414,6 +463,8 @@ def funnel(db: Session, profile_ids: Optional[Sequence[int]] = None,
         "passed": passed,
         "offers": offers,
         "hired": hired,
+        "completed": sum(1 for row in live if row.status in ("done", "no_show")),
+        "rounds": how_far(db, live),
         "cancelled": sum(1 for row in rows if row.status == "cancelled"),
         "rejected": sum(1 for row in live if row.outcome == "rejected"),
         # Replies with no time agreed. Not part of any rate — nothing has
@@ -432,6 +483,50 @@ def funnel(db: Session, profile_ids: Optional[Sequence[int]] = None,
 # --------------------------------------------------------------------------- #
 # Developers
 # --------------------------------------------------------------------------- #
+
+def how_far(db: Session, rows: Sequence[Interview]) -> dict:
+    """How far these conversations got, counted in conversations not sittings.
+
+    The question is "how many clients did I get to a second round with", and a
+    chain of three sittings is one answer to it, not three. Counting rows would
+    say a team that ran one long process with a single client had more
+    second rounds than a team that reached four clients once each — the exact
+    inversion of what the person asking wants to know.
+
+    So everything here is grouped on the chain root. `one_round` is a client who
+    spoke once and went no further; `two_plus` cleared at least one round;
+    `furthest` is the longest single conversation in the window.
+
+    A chain whose first round is outside the window still counts once, under
+    its own root — `chains` fetches predecessors, so a report on February does
+    not turn January's screening call into a second conversation.
+    """
+    if not rows:
+        return {"conversations": 0, "one_round": 0, "two_plus": 0,
+                "three_plus": 0, "furthest": 0, "sittings": 0}
+
+    lineage = chains(db, rows)
+    # One entry per conversation. Every row in a chain carries the same
+    # `rounds`, so last-write-wins is the same as first.
+    size_of_chain: dict[int, int] = {}
+    for row in rows:
+        mark = lineage.get(row.id)
+        if mark:
+            size_of_chain[mark["root"]] = mark["rounds"]
+
+    sizes = list(size_of_chain.values())
+    return {
+        "conversations": len(sizes),
+        "one_round": sum(1 for n in sizes if n == 1),
+        "two_plus": sum(1 for n in sizes if n >= 2),
+        "three_plus": sum(1 for n in sizes if n >= 3),
+        "furthest": max(sizes, default=0),
+        # The sittings behind those conversations, so the two numbers can be
+        # shown side by side — "9 conversations, 14 interviews" is the shape of
+        # a team that is getting called back.
+        "sittings": len(rows),
+    }
+
 
 def by_stage(rows: Sequence[Interview]) -> list[dict]:
     """How many conversations reached each rung, and how many died there.
@@ -520,7 +615,9 @@ def developer_rows(db: Session) -> list[dict]:
     return out
 
 
-def for_developer(db: Session, dev: User, profiles: Sequence[Profile]) -> dict:
+def for_developer(db: Session, dev: User, profiles: Sequence[Profile],
+                  date_from: Optional[dt.date] = None,
+                  date_to: Optional[dt.date] = None) -> dict:
     """Everything one developer's own screen is made of.
 
     Deliberately not gated behind the dashboard switch the BDs have. That
@@ -531,11 +628,15 @@ def for_developer(db: Session, dev: User, profiles: Sequence[Profile]) -> dict:
     """
     ids = [p.id for p in profiles]
     rows = decorate(db, load(db, ids))
+    if date_from or date_to:
+        rows = [row for row in rows
+                if (date_from is None or row["when"]["day"] >= date_from.isoformat())
+                and (date_to is None or row["when"]["day"] <= date_to.isoformat())]
     return {
         "developer": {"id": dev.id, "name": dev.name, "email": dev.email},
-        **split(rows),
+        **split(rows, date_range=bool(date_from or date_to)),
         "counts": counts(rows),
-        "funnel": funnel(db, ids),
+        "funnel": funnel(db, ids, date_from=date_from, date_to=date_to),
     }
 
 

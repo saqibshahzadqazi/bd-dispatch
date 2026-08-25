@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import PersonDashboard from "./PersonDashboard.jsx";
-import { Loading } from "./widgets.jsx";
+import { DateRange, Loading } from "./widgets.jsx";
 
 /** A BD's own dashboard.
  *
@@ -13,6 +13,7 @@ import { Loading } from "./widgets.jsx";
 export default function Dashboard({ onOpenWork }) {
   const [data, setData] = useState(null);
   const [batchId, setBatchId] = useState(null);
+  const [dateRange, setDateRange] = useState({ dateFrom: "", dateTo: "" });
   const [board, setBoard] = useState(null);
   const [showBoard, setShowBoard] = useState(false);
   const [error, setError] = useState("");
@@ -20,7 +21,7 @@ export default function Dashboard({ onOpenWork }) {
 
   const load = useCallback(async (id) => {
     try {
-      const next = await api.dashboard(id);
+      const next = await api.dashboard(id, dateRange.dateFrom, dateRange.dateTo);
       setData(next);
       if (!id && next.batch) setBatchId(next.batch.id);
       setError("");
@@ -29,7 +30,7 @@ export default function Dashboard({ onOpenWork }) {
       if (/has not opened/i.test(err.message)) setShut(true);
       else setError(err.message);
     }
-  }, []);
+  }, [dateRange]);
 
   useEffect(() => { load(batchId); }, [batchId, load]);
 
@@ -67,6 +68,8 @@ export default function Dashboard({ onOpenWork }) {
       data={data}
       batchId={batchId}
       onBatchChange={setBatchId}
+      dateRange={dateRange}
+      onDateRangeChange={setDateRange}
       onOpenWork={onOpenWork}
       board={board}
       showBoard={showBoard}
